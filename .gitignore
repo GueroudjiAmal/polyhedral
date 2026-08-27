@@ -4,3 +4,17 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 polaris/env.generated.sh
+
+# Polaris: created on the cluster, must never dirty the tree or a pull is blocked
+.venv-polaris/
+.triton-cache-*/
+.inductor-cache-*/
+
+# PBS stdout/stderr land here (-o logs/); keep the directory, ignore the output
+logs/*
+!logs/.gitkeep
+
+# job outputs. results/{reindex,results,predictions-*} stay TRACKED on purpose.
+results/gonogo-*
+results/smoke-*
+results/exp-*

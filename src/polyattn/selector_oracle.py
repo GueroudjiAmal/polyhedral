@@ -61,9 +61,28 @@ def oracle_costs(mask, N, BQ, A, candidates=CANDIDATES):
     return out
 
 
-def oracle(mask, N, BQ, A, candidates=CANDIDATES):
+def is_class_b(name):
+    """Class B = q-dependent (shear, stridefold): per-tile gather, un-amortisable.
+
+    Element count cannot distinguish these from class A -- on a lattice mask
+    stridefold-s and residue-perm-s are EXACTLY tied -- yet stridefold needs ~136
+    kv rows per 16x16 tile against residue-perm's 16. See NOTES sec 5h.
+    """
+    return name == "shear" or name.startswith("stridefold-")
+
+
+def oracle(mask, N, BQ, A, candidates=CANDIDATES, prefer_class_a=False):
+    """Argmin and costs. `prefer_class_a` breaks ties toward the free transform.
+
+    The default (candidate order) is the convention all three sessions agreed;
+    it is also indifferent between a free permutation and one needing 8x the
+    memory traffic, and therefore PENALISES a selector that prefers the free one.
+    Both conventions are reported by `evaluate` rather than one being chosen.
+    """
     c = oracle_costs(mask, N, BQ, A, candidates)
-    return min(c, key=c.get), c
+    key = ((lambda k: (c[k], is_class_b(k), CANDIDATES.index(k))) if prefer_class_a
+           else (lambda k: (c[k], CANDIDATES.index(k))))
+    return min(c, key=key), c
 
 
 # --------------------------------------------------------------- test set ----
@@ -167,27 +186,39 @@ def evaluate(selector, ns=(1024, 1536, 2048), tiles=None, seed=20260826,
              verbose=True):
     """agreement, mean regret, max regret -- the three numbers being compared."""
     tiles = tiles or GRID_TILES
-    hits = total = 0
+    hits = total = ties = hits_a = 0
     regrets, worst = [], (1.0, None)
     per_family = {}
     for m, N, BQ, A in instances(ns, tiles, seed):
         best, costs = oracle(m, N, BQ, A)
+        best_a, _ = oracle(m, N, BQ, A, prefer_class_a=True)
+        lo = min(costs.values())
+        winners = [k for k, v in costs.items() if v == lo]
+        ties += (any(is_class_b(w) for w in winners)
+                 and any(not is_class_b(w) for w in winners))
         pick = selector(m, N, BQ, A)
         if pick not in costs:
             pick = "identity"                   # unavailable pick scored as identity
         r = costs[pick] / costs[best]
         total += 1
         hits += (pick == best)
+        hits_a += (pick == best_a)
         regrets.append(r)
         if r > worst[0]:
             worst = (r, (m.name, N, BQ, A, pick, best))
         fam = getattr(m, "family", "?")
         d = per_family.setdefault(fam, [0, 0, []])
         d[0] += (pick == best); d[1] += 1; d[2].append(r)
-    res = dict(agreement=hits / total, mean_regret=float(np.mean(regrets)),
-               max_regret=worst[0], worst_case=worst[1], n=total)
+    res = dict(agreement=hits / total, agreement_class_a=hits_a / total,
+               mean_regret=float(np.mean(regrets)), max_regret=worst[0],
+               worst_case=worst[1], n=total, class_ab_ties=ties)
     if verbose:
-        print(f"  agreement   {res['agreement']*100:.1f}%  ({hits}/{total})")
+        print(f"  agreement   {res['agreement']*100:.1f}%  ({hits}/{total})"
+              f"   [candidate-order ties]")
+        print(f"              {res['agreement_class_a']*100:.1f}%  ({hits_a}/{total})"
+              f"   [class-A-preferring ties]")
+        print(f"  class A/B ties in the cost function: {ties} ({ties/total*100:.1f}%)"
+              f" -- element count cannot separate them")
         print(f"  regret      mean {res['mean_regret']:.4f}   max {res['max_regret']:.4f}")
         if worst[1]:
             n_, N_, bq, a, p, b = worst[1]

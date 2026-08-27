@@ -85,6 +85,38 @@ PY
 python -m pip install -r gpu/requirements.txt || {
   echo "pip install failed -- if torch already came from the conda module, that is fine."; }
 
+# --- torch import diagnostic --------------------------------------------
+# A bare `import torch` traceback here is misleading: on a LOGIN node the most
+# common cause is simply that libcuda.so.1 does not exist (no GPU, no driver),
+# which is EXPECTED and not a setup failure. A different missing library is a
+# real problem. Distinguish them instead of printing a traceback.
+echo
+echo "== torch import check (login node -- no GPU here by design)"
+python - <<'PYCHK'
+import ctypes, traceback
+try:
+    ctypes.CDLL("libcuda.so.1")
+    print("  libcuda.so.1: present")
+except OSError as e:
+    print(f"  libcuda.so.1: ABSENT ({e})")
+    print("     ^ normal on a Polaris login node. Only a problem if it also")
+    print("       happens inside a job -- that is what job_smoke.pbs checks.")
+try:
+    import torch
+    print(f"  import torch: OK  {torch.__version__}  cuda {torch.version.cuda}")
+except Exception as e:
+    msg = str(e)
+    print(f"  import torch: FAILED  {type(e).__name__}: {msg}")
+    if "libcuda" in msg:
+        print("     -> driver library only. Expected on a login node; verify in a job.")
+    else:
+        print("     -> NOT a driver issue. Likely the module environment is missing a")
+        print("        runtime dependency this torch build needs. Check:")
+        print("          module list")
+        print("          echo $LD_LIBRARY_PATH | tr : '\n' | grep -iE 'cuda|nvidia|nvhpc'")
+        print("        and try loading conda WITHOUT the `module reset` above.")
+PYCHK
+
 echo
 echo "== setup done. Next:"
 echo "   module stack that worked: ${LOADED_MODULE:-unknown}"

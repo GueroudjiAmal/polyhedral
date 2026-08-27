@@ -545,7 +545,8 @@ review caught it — third axis-confound of the project, and I made the same
 mistake §3a exists to warn about. Tested on the full product,
 `experiments.tile_shape_law`, N=2048.*
 
-`local256+str8`, argmin transform (waste) per cell:
+`local256+str8`, argmin transform (waste) per cell, **at N=2048** — the argmin
+also moves with `N`, see §5i:
 
 | BQ \\ A | 128 | 64 | 32 | 16 |
 |---|---|---|---|---|
@@ -1130,6 +1131,43 @@ selector — and it went unnoticed through 714 instances, three independent
 implementations and a shared oracle. It is also a preview of what the GPU is for:
 the tie is invisible to every model any of us built, and trivially visible to
 hardware.
+
+---
+
+## §5i — The argmin also moves with N
+
+Reported by the third session and **verified here against this session's own
+oracle** — it contradicts §5c's published table, so it was checked rather than
+accepted. All six cells reproduce exactly.
+
+`local256+str8`, class-A candidates, oracle element counts:
+
+| tile | N | identity | rp2 | rp4 | rp8 | argmin |
+|---|---|---|---|---|---|---|
+| 128×128 | 1024 | 589,824 | **557,056** | 786,432 | 1,048,576 | rp2 |
+| 128×128 | 2048 | 2,228,224 | **1,671,168** | 2,031,616 | 3,145,728 | rp2 |
+| 128×128 | 4096 | 8,650,752 | 5,472,256 | **5,308,416** | 7,733,248 | **rp4** |
+| 16×16 | 1024 | 532,480 | 399,360 | **354,304** | 374,784 | rp4 |
+| 16×16 | 2048 | 2,113,536 | 1,341,440 | 1,001,472 | **923,648** | **rp8** |
+| 16×16 | 4096 | 8,421,376 | 4,798,464 | 3,082,240 | **2,414,592** | rp8 |
+
+So **selection is a function of (predicate, BQ, A, N)**. §5c's table needs "at
+N=2048" attached, exactly as §5f needed "long-document number". The mechanism is
+not mysterious: this mask's band is fixed at 256 while its lattice component
+grows with `N`, so the balance between them shifts and with it the best fold
+depth. *Any* union of a bounded and an unbounded piece will do this.
+
+`polyattn.selector` tracks it correctly in all six cells — the implementation was
+never wrong, only the documentation, which had generalised a table measured at one
+sequence length.
+
+**The escalation is the finding.** §5b: the argmin moves with grain. §5c: no, with
+`max(BQ,A)`. §5e: no, with `(BQ, A)`. §5i: and with `N`. Four times the answer was
+*the rule needs one more input than we thought* — which is itself the argument
+that **there is no rule, only an evaluation**. It also strengthens item 1 rather
+than weakening it: a lookup table now needs a third input, and `N` is a
+deployment property that changes per request, so every fixed table is wrong at
+some context length while an exact evaluator handles it for free.
 
 ---
 
