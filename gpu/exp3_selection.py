@@ -16,6 +16,21 @@ DOES THE WALL-CLOCK ARGMIN MATCH THE ELEMENT-COUNT ARGMIN?
     is worth more care than anything else here.
 
 Reports both argmins per tile shape and flags every disagreement.
+
+THE DISAGREEMENT COUNT IS A PROPERTY OF THE (MASK, CANDIDATE SET) PAIR, NOT OF
+THE MASK. Measured analytically with the mask and criteria held fixed and only
+the candidate list varied, local256+str8 runs 0% / 25% / 38% / 38% / 0% across
+{id,rp2} / {id,rp2,rp4} / {id,rp2,rp4,rp8} / {id..rp16} / {id,rp3,rp5} -- rp3 and
+rp5 do not collapse a stride-8 lattice, so a set containing only those has
+nothing to disagree about.
+
+Consequences, both of which apply to whatever number this prints:
+  * the candidate set must be quoted WITH the number, and must be the same set
+    the selectors use, or the wall-clock result is not comparable to the counting
+    result it exists to adjudicate;
+  * widening the set can only ADD disagreements, so a small count from a narrow
+    set is not evidence of a small effect. The set below is the widest the kernel
+    can run, to make the number an upper-ish bound rather than an arbitrary point.
 """
 import sys
 
@@ -29,7 +44,8 @@ from triton_attn import block_sparse_attention             # noqa: E402
 N, D, BH = 4096, 64, 8
 NAMES = ["local256+str8", "dilated-8", "window-128"]
 TILES = [(128, 128), (128, 32), (128, 16), (64, 64), (64, 16), (32, 32), (16, 16)]
-PERMS = [None, 2, 4, 8, 16]
+PERMS = [None, 2, 4, 8, 16]      # {identity, rp2, rp4, rp8, rp16} -- QUOTE THIS
+                                 # WITH ANY NUMBER THIS EXPERIMENT PRODUCES
 
 
 class _Dense:
@@ -79,7 +95,12 @@ def main():
             title=f"{name}   N={N} BH={BH}   selector validity",
             note="'cost of' = how much slower the model's pick is than the true best.\n"
                  "1.00 means no loss; anything above it is the price of a wrong selection.")
+    cset = "{" + ", ".join("identity" if p is None else f"rp{p}" for p in PERMS) + "}"
     print(f"\n{'=' * 60}")
+    print(f"CANDIDATE SET: {cset}")
+    print("  The count below is for THIS set. The same masks under {identity, rp2,")
+    print("  rp4} can give 0% where this gives 38%. Widening only adds")
+    print("  disagreements, so a small number here is not a small effect.")
     print(f"TOTAL DISAGREEMENTS: {disagreements}")
     print("Zero -> the element-count cost model is a valid transform selector.")
     print("Nonzero -> it is not, and NOTES novelty item 1 needs restating.")

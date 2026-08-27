@@ -35,7 +35,12 @@ OUR_TILES = ((128, 128), (16, 16))
 # exp0 asks whether small tiles lose on occupancy -- so launch config, the knob
 # that decides that, must not be pinned. A fixed num_warps favours the large tile
 # and would measure our configuration rather than the hardware.
-LAUNCH = ((4, 2), (8, 2), (4, 3), (8, 3), (2, 2))
+#: Widened after the first run: BOTH 16x16 rows picked w2/s2, the minimum of
+#: both parameters in the original sweep ((4,2),(8,2),(4,3),(8,3),(2,2)). A winner
+#: on the boundary means the optimum may lie outside what was offered, and both
+#: headline numbers -- the 1.61x small-tile penalty and the 3.19x transform gain --
+#: came from those rows. num_warps=1 is legal and was never tried.
+LAUNCH = ((1, 2), (1, 3), (2, 2), (2, 3), (2, 4), (4, 2), (4, 3), (8, 2), (8, 3))
 
 
 class _Dense:
@@ -43,6 +48,23 @@ class _Dense:
         self.M = M
     def row_cols(self, q, N):
         return self.M[q]
+
+
+def _warn_if_on_boundary(cfg, label=""):
+    """A winner at the edge of the sweep is a sweep that was too narrow.
+
+    This is what the first run did silently: both 16x16 rows chose the minimum
+    num_warps AND the minimum num_stages offered, and nothing said so.
+    """
+    if cfg is None:
+        return ""
+    w, st = (int(x[1:]) for x in cfg.split("/"))
+    ws = sorted({c[0] for c in LAUNCH})
+    ss = sorted({c[1] for c in LAUNCH})
+    edge = [n for n, v, lo, hi in (("warps", w, ws[0], ws[-1]),
+                                   ("stages", st, ss[0], ss[-1]))
+            if v == lo or v == hi]
+    return f"  <-- ON SWEEP BOUNDARY ({', '.join(edge)}){label}" if edge else ""
 
 
 def best_launch(fn_of):
@@ -94,13 +116,16 @@ def main():
             q3, k3, v3, *idx, kind, p0, p1, p2, BQ, A, num_warps=w, num_stages=st))
         if base_ms is None:
             base_ms, base_el = t, bi.elements
-        rows.append([f"ours {BQ}x{A} identity", bi.waste, t, f"w{w}/s{st}",
-                     base_el / bi.elements, base_ms / t])
+        cfg = f"w{w}/s{st}"
+        rows.append([f"ours {BQ}x{A} identity" + _warn_if_on_boundary(cfg),
+                     bi.waste, t, cfg, base_el / bi.elements, base_ms / t])
     t_perm, wp, stp = best_launch(lambda w, st: block_sparse_attention(
         qp, kp, vp, *idx_p, kind, p0, p1, p2, 16, 16,
         perm_q=perm.int(), perm_kv=perm.int(), num_warps=w, num_stages=st))
-    rows.append(["ours 16x16 residue-perm-8", bi_p.waste, t_perm, f"w{wp}/s{stp}",
-                 base_el / bi_p.elements, base_ms / t_perm])
+    cfgp = f"w{wp}/s{stp}"
+    rows.append(["ours 16x16 residue-perm-8" + _warn_if_on_boundary(cfgp),
+                 bi_p.waste, t_perm, cfgp, base_el / bi_p.elements,
+                 base_ms / t_perm])
 
     try:
         from torch.nn.attention.flex_attention import create_block_mask, flex_attention
@@ -122,7 +147,7 @@ def main():
         print(f"flex_attention unavailable: {e}")
 
     pc = permute.permutation_cost_ms(q3, k3, v3, perm)
-    bench.report(rows, [("implementation", 28), ("waste", 9), ("ms", 11),
+    bench.report(rows, [("implementation", 52), ("waste", 9), ("ms", 11),
                         ("launch", 9), ("PREDICTED", 11), ("MEASURED", 11)],
                  title=f"GO/NO-GO   {NAME} + residue-perm-{STRIDE}   "
                        f"N={N} B={B} H={H} D={D}",

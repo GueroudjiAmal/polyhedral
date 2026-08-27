@@ -72,6 +72,7 @@ Everything lands in `results/` stamped with the date and job id.
 | `exp-*-exp1_tile_shape.txt` | mechanism 2 — does wall-clock track elements as `BQ` falls, or flatten? (`docs/NOTES.md` §3a) |
 | `exp-*-exp2_class_a.txt` | mechanism 1 — the go/no-go. dilated-8 + residue-perm-8, predicted 7.79× fewer elements. Permutation cost reported separately. (§4) |
 | `exp-*-exp3_selection.txt` | **the top-ranked contribution.** Does the wall-clock argmin match the element-count argmin? Any disagreement kills novelty item 1 in its current form. (§5b, §5e) |
+| `exp-*-exp8_three_cells.txt` | **the three cells that measure a coefficient rather than a rate.** Two bracket the contiguity coefficient from opposite sides; the third tests the wave account with no free parameter. N is load-bearing in the third — at a convenient N it silently returns a null. |
 | `exp-*-exp4_flex_baseline.txt` | FlexAttention at BLOCK_SIZE 128/64/32 — the incumbent at a tile size it can actually use. (§3a-bis) |
 
 ## If the job goes to H or E instead of running

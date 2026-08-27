@@ -57,7 +57,18 @@ def main():
             [("tile", 10), ("waste", 9), ("ms", 10), ("elem gain", 11), ("time gain", 11)],
             title=f"{name}   N={N} BH={BH} D={D}   baseline = 128x128",
             note="elem gain = what the cost model predicts. time gain = what the GPU did.\n"
-                 "A gap between the two columns IS the result.")
+                 "A gap between the two columns IS the result.\n"
+                 "\n"
+                 "READ THIS AS p(BQ, A, MASK), NOT p(BQ, A). exp0 measured a 1.61x\n"
+                 "small-tile penalty at CONSTANT element count -- but the permuted\n"
+                 "kernel at the same 16x16 tile delivered only 66% of its predicted\n"
+                 "gain, and the tile shape was held fixed there, so occupancy alone\n"
+                 "does not explain it. The likely mechanism is that per-CTA fixed\n"
+                 "cost (Q tile load, softmax init and epilogue) is amortised over\n"
+                 "FEWER tiles when the mask is sparser, so the penalty grows as work\n"
+                 "per program shrinks. If that is right, p varies across masks at a\n"
+                 "FIXED tile shape and a 2-D correction table is under-specified.\n"
+                 "Compare the same tile row across the four masks to find out.")
 
 
 if __name__ == "__main__":

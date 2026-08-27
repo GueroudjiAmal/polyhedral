@@ -151,3 +151,69 @@ def test_finding_symmetry_does_not_imply_the_max_law():
     g = law.grid(masks.BidirectionalDocPacked(512), N=2048)
     assert law.symmetry(g) < 1e-12
     assert law.max_law(g)[128] == pytest.approx(0.223, abs=0.01)
+
+
+def test_finding_class_b_cost_is_a_bracket_not_an_estimate():
+    """§4/§5. kv_per_tile counts DISTINCT rows, which assumes intra-tile sharing
+    the kernel cannot express: for kv' = (kv - a*q)/s the row index is a [BQ, A]
+    MATRIX, so K is not shared across a tile's query rows and a tl.dot kernel
+    loads BQ*A rows' worth. Lower and upper bounds are 8-64x apart.
+
+    Recorded so the optimistic end (1.94x at 16x16) is never quoted bare again.
+    """
+    for BQ, A, gap in ((128, 128, 64.3), (128, 32, 25.8), (16, 16, 8.3)):
+        lo = transforms.kv_per_tile("B", 1, 1, BQ, A)     # distinct rows
+        hi = BQ * A                                        # no sharing at all
+        assert hi / lo == pytest.approx(gap, rel=0.02)
+        assert lo > transforms.kv_per_tile("A", 0, 1, BQ, A)
+
+
+def test_finding_the_class_ab_criterion_is_the_row_index_shape():
+    """§4. Sharper than amortisability and derivable from the predicate: a == 0
+    gives a vector row index (K shared across the tile), a != 0 gives a [BQ, A]
+    matrix (it cannot be). Selector-visible, not an implementation detail."""
+    import numpy as np
+    M = np.zeros((64, 64), dtype=bool)
+    M[0, 0] = True
+    for name, fn in transforms.candidates():
+        out, meta = fn(M)
+        if meta is None:
+            continue
+        kind, a, _ = meta
+        assert (a != 0) == (kind == "B"), f"{name}: index shape must track the class"
+
+
+def test_finding_disagreement_rate_depends_on_the_candidate_set():
+    """§7e. Three sessions each proposed a condition for WHICH MASKS show a
+    counting-vs-hardware disagreement, and all three failed on different masks.
+    The rate is not a property of the mask: hold the mask and the criteria fixed,
+    vary only the candidate list, and it moves 0% -> 38% -> 0%.
+
+    This is why exp3 and exp7 must quote their candidate set with any number they
+    report -- a small count from a narrow set is not a small effect.
+    """
+    import numpy as np
+
+    def stats(M, BQ, A):
+        t = M.reshape(M.shape[0] // BQ, BQ, M.shape[1] // A, A).any(axis=(1, 3))
+        return int(t.sum()), int(t.sum(axis=1).max())
+
+    m, tiles = masks.LocalStrided(256, 8), [(bq, a) for bq in (128, 64, 32, 16)
+                                            for a in (128, 64, 32, 16)]
+    rates = {}
+    for label, folds in (("narrow", (2,)), ("wide", (2, 4, 8)), ("coprime", (3, 5))):
+        dis = tot = 0
+        for N in (1024, 2048):
+            M0 = np.stack([m.row_cols(i, N) for i in range(N)])
+            cand = {"id": M0}
+            for s in folds:
+                cand[f"rp{s}"] = transforms.make_residue_perm(s)(M0)[0]
+            for BQ, A in tiles:
+                st = {k: stats(v, BQ, A) for k, v in cand.items()}
+                tot += 1
+                dis += (min(st, key=lambda k: st[k][0])
+                        != min(st, key=lambda k: st[k][1]))
+        rates[label] = dis / tot
+    assert rates["narrow"] == 0.0, "a single fold has nothing to disagree with"
+    assert rates["wide"] > 0.3, "adding rp4/rp8 creates disagreements"
+    assert rates["coprime"] == 0.0, "rp3/rp5 do not collapse a stride-8 lattice"

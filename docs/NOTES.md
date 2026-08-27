@@ -276,6 +276,22 @@ kv' = pi_kv(kv)              # CLASS A: q-independent relabelling of keys
 kv' = (kv - a*q) / s         # CLASS B: q-dependent shear / stride-fold
 ```
 
+**The criterion is the SHAPE OF THE ROW INDEX, which is sharper than
+amortisability and is derivable from the predicate.** §4 originally justified the
+split by *where* the cost falls (once per layer vs per tile). The index-shape
+argument says *why the cost exists at all*:
+
+| transform | row index | consequence |
+|---|---|---|
+| `kv' = π(kv)` | **vector** `[A]` | K shared across all query rows of a tile |
+| `kv' = (kv − aq)/s` | **matrix** `[BQ, A]` | K cannot be shared; working set ×BQ |
+
+That is checkable from the transform's algebra — `a = 0` gives a vector index,
+`a ≠ 0` gives a matrix — so it is **selector-visible** rather than an
+implementation observation. It is also why class B is a different *kernel* rather
+than a flag, and why every class B number in this project is a traffic count:
+**class B has never been executed here, only modelled.**
+
 **The two classes have completely different costs, and this turned out to be the
 decisive distinction:**
 
@@ -1530,8 +1546,19 @@ might say "affine scheduling", "loop transformation" or "iteration space" instea
 
 ## §7b — Method note: how these corrections were actually found
 
-**The dominant failure mode, stated first because it now accounts for nearly all
-of them: a test set whose inputs all share a property nobody wrote down.** Not a
+**THE HEADLINE RULE, because it is the only one here that would have prevented
+every instance rather than caught it: you cannot learn from an experiment whose
+outcome space does not contain the answer you plan to draw.** Four instances
+across three sessions in one day — a proposed hardware correction whose algebra
+forced the answer before the run; a plan to close a question with a measurement
+that does not bound it; a regime probe with a `continue` skipping the regime; a
+probe whose decline mechanism filtered out its own property. It is the design-side
+twin of *a passing check proves nothing unless a failing version of it exists*:
+one asks whether the check could fail, the other whether the experiment could
+answer.
+
+**The dominant failure mode by count, and it accounts for nearly all the rest: a
+test set whose inputs all share a property nobody wrote down.** Not a
 reasoning slip — the reasoning is usually fine on the inputs it saw. In one day
 three independent sessions committed the identical error: this session verified a
 closed form on three *bounded* offset sets and called it exact (it is ~2× wrong on
@@ -1709,6 +1736,25 @@ Anywhere a candidate declines on the condition a probe is testing, the probe is
 empty by construction. Distinct from an upstream exclusion in the grid and from a
 merely wrong label.
 
+**Verifying the arithmetic of a rule is not verifying the rule.** I was sent a
+decision boundary of 0.940 for a cell, derived as the geometric midpoint of two
+point predictions, and I checked it: `sqrt(0.850 × 1.039) = 0.9399`. Correct, and
+beside the point. I never asked whether a *midpoint between two predictions
+nobody trusts* means anything — and the same message had already withdrawn one of
+those magnitudes, while `exp0` had already falsified the other by overpredicting
+2.5×. The rule was wired in for an hour before its author withdrew it.
+
+Checking the derivation is not checking the premise. It is the numerical twin of
+a shape check that restates its label: it can only fail if the arithmetic is
+wrong, and the arithmetic was the part nobody doubted.
+
+**A passing check proves nothing unless a failing version of it exists.** The
+executable form of *what would have to be true for this to come out the other
+way*. exp5's equivariance test permutes position ids and passes — which would be
+equally true of a test that never exercised RoPE at all, so it carries a negative
+control that regenerates positions with `arange()` and must fail by orders of
+magnitude. Same defect as a probe that runs without exhibiting its property.
+
 **Propose a check, then run it against your own artefact first.** Three for
 three today, each time on the artefact of whoever had just proposed the check:
 this session proposed probe verification and shipped ten tautologies; the
@@ -1855,6 +1901,204 @@ central claim after two of three sessions had independently written them out.
 **The causal half of the original sentence stands unchanged:** none of the
 numbers got worse because anyone was careless. They got worse because someone
 chose an input the original author would not have.
+
+---
+
+## §7e — First hardware numbers, and my pre-registered predictions scored
+
+exp0 ran on an A100. The first numbers in this project that are not counts:
+
+| | ms | waste |
+|---|---|---|
+| 128×128 identity (our baseline) | 0.388 | 8.23 |
+| 16×16 identity | **0.625** | 8.02 |
+| 16×16 + residue-perm-8 | **0.122** | 1.03 |
+| FlexAttention, default 128×128 | **0.319** | — |
+| permutation (excluded from all rows) | 0.105 | — |
+
+**Mechanism 1 survived hardware.** 3.18× against our own baseline, 2.61× against
+FlexAttention's default, correctness clean on all four sections including the
+permuted path. After mechanism 2 died and mechanism 1 turned out to be prior art
+twice, this is the first claim to survive contact with a GPU.
+
+**Our own baseline was flattering us.** FlexAttention's default (0.319) beats our
+128×128 kernel (0.388). The honest headline is **2.61×**, not 3.18× and certainly
+not 7.79×. It is also an *upper bound*: FlexAttention at 64×64 and 32×32 both
+returned `BackendCompilerFailed`, so the opponent ran untuned.
+
+### Scoring the pre-registration (`results/predictions-d4.txt`)
+
+**Prediction 3 — CONFIRMED, and more cleanly than I framed it.** I predicted
+wall-clock would fall short of the element prediction at 16×16 because small
+query tiles cost occupancy the model prices at zero. The 16×16 identity row is
+the cleanest measurement in the project: **essentially the same element count as
+128×128, and 1.61× slower.** §3a's caveat is now a number.
+
+**Prediction 4 — WRONG, and my pre-registration was defective.** I said the
+7.79× class A gain "is the one I expect to HOLD" and that "if this one misses
+badly, the class A/B distinction itself is wrong." Measured at fixed 16×16:
+**5.12×, or 66% of prediction.** I never defined *badly*, which let me decide
+after seeing the number — the exact failure the pre-registration existed to
+prevent. Recorded as a miss.
+
+What I can defend: 5.12× is not a null result, so the class A/B distinction is
+not falsified. What I owe is a mechanism for the missing 34%, not an excuse.
+
+**The mechanism is probably not occupancy, and that matters.** The comparison was
+at a *fixed* 16×16 tile, so the small-tile penalty is held constant and cannot
+explain the gap. The likely cause is that per-CTA fixed cost — Q tile load,
+softmax init and epilogue — is amortised over **fewer tiles** when the mask is
+sparser. The permuted kernel visits ~8× fewer tiles per program, so the fixed
+cost is a larger fraction of its runtime.
+
+If that is right, **the tile penalty is not a function of tile shape alone**:
+`p = p(BQ, A, mask)`, and a 2-D correction table `elements × p(BQ,A)` is
+under-specified. exp1 can settle it — compare the same tile row across its four
+masks and see whether `p` moves. That check is now written into exp1's output
+rather than left to be remembered.
+
+### Both proposed hardware corrections are argmin-inert
+
+The 34% shortfall needed a mechanism and my fixed-cost hypothesis is the best one
+on the table — but a reviewing session showed it **cannot move a selection
+decision**, and I verified that rather than accepting it:
+
+```
+time(t) = nprog·F + elements(t)·V/(BQ·A),    nprog = (N/BQ)·BH
+```
+
+`nprog` does not depend on the transform, because the grid is `(N/BQ, BH)`. So a
+per-CTA fixed cost enters as an **additive constant** at fixed tile shape and a
+tile penalty `p(BQ,A)` as a **multiplicative** one. Both leave the argmin exactly
+where element counting put it. Measured here: **argmin changed in 0 of 480 cells**
+across four masks, three sequence lengths, five tile shapes and eight `(F,V)`
+settings. A second session got 0/324 independently.
+
+So my mechanism explains the *magnitude* — an additive constant compresses every
+ratio toward 1, which is why 5.12 < 7.79 — and is irrelevant to *selection*.
+
+### Which promotes the taxonomy that was ranked third
+
+To move a decision, a term must differ **by transform at a fixed tile shape**.
+Going through the taxonomy, every such quantity is **memory, not compute**:
+
+| transform | kv rows per 16×16 tile |
+|---|---|
+| identity, residue-perm-8 | **16** (class A, contiguous) |
+| shear | 31 (class B, per-tile gather) |
+| stridefold-8 | **136** (class B, worst case) |
+
+**CORRECTION — that enumeration is incomplete, and the gap is compute-side.**
+The grid is one program per row-block, so runtime tracks the **slowest** program,
+not the sum. `max tiles per row-block` is transform-dependent and is *not* a
+monotone function of total tiles, so it escapes the inertness proof entirely
+(which covers `g(elements, BQ, A)` increasing in elements). Verified here:
+**17 of 160 cells** have a different argmin under total tiles than under
+max-tiles-per-program — all on union masks, none on pure lattices, and with both
+candidates class A, so a memory account predicts no difference at all:
+
+> `local256+str8`, N=2048, 128×32 — counting picks rp2 (408 total, 40 max),
+> makespan picks rp4 (424 total, **34** max). rp4 computes *more* and has a
+> *smaller* worst program.
+
+`gpu/exp7_load_imbalance.py` adjudicates: the two criteria disagree in
+**direction**, so one pair of timings settles it, and 16×16 (~9 waves vs ~1) is
+the built-in control — the effect must weaken there or the cause is not
+imbalance.
+
+With that correction: element counting measures compute *volume*; the terms it
+misses are memory **and** makespan. So it still cannot separate class A from
+class B even in principle — and the class A/B legality-and-cost taxonomy, ranked *third* behind
+the selection model and the impossibility argument, is the only axis on which a
+hardware-informed selector can beat a counting one.
+
+Two sessions independently computed the flip thresholds on their own instance
+sets: of 544 cases where class B wins on elements, a traffic multiplier of 1.20×
+flips 249, 1.50× flips 415, and 1.94× flips 510. §4's own shear figure is 1.94×.
+
+**exp6 measures a LOWER BOUND, not the class B penalty.** Its gather touches
+exactly `A` rows, so it isolates *coalescing at a constant row count*. Class B
+touches `A + a(BQ−1)` distinct rows — 1.94× to 15.5× more depending on tile shape
+(128×16: 16 vs 143 for shear, 248 for stridefold-8). I had proposed that a small
+exp6 number would settle the question; **that inference is wrong and unsafe** —
+exp6 could read 1.05 with a true class B penalty of 8×. exp6 now also sweeps
+`R/A ∈ {2,4,8}` so the two factors compose.
+
+**Class B has never been executed, only modelled.** The kernel's `perm_q`/`perm_kv`
+are per-axis index arrays: they express a permutation, not a `q`-dependent shear.
+Every class B number in this project is a traffic *count*. That is a limitation of
+the kernel, not of the analysis, and it should be stated as one.
+
+`gpu/exp6_traffic_multiplier.py` measures it directly: identical mask, identical
+tiles, identical element count, and — verified per row before timing — identical
+output. The only difference is whether K/V rows are read contiguously from a
+physically permuted tensor or gathered per tile from the original. The ratio *is*
+the traffic term, with nothing else varying.
+
+### A disagreement rate is a property of (mask, candidate set), not of the mask
+
+Three conditions were proposed today for *which masks* show a
+counting-vs-hardware disagreement, and all three failed on different masks. The
+reason, found by a reviewing session and verified here with mask and criteria
+held fixed while only the candidate list moved:
+
+| mask | {id,rp2} | {id,rp2,rp4} | {id,rp2,rp4,rp8} | {id..rp16} | {id,rp3,rp5} |
+|---|---|---|---|---|---|
+| local256+str8 | 0% | 25% | **38%** | 38% | **0%** |
+| twoband-mis, sinks, docpack | 0% | 0% | 0% | 0% | 0% |
+
+Same mask, same criteria, same hardware model — `rp3` and `rp5` do not collapse a
+stride-8 lattice, so a set containing only those has nothing to disagree about.
+Every proposed condition tried to predict from the mask alone a quantity that
+depends on the pair.
+
+**A wrinkle my numbers add to theirs:** their sweep used a different criterion
+pair and reported `twoband` and `sinks` moving 0% → 59% on the same axis where
+mine stay flat at 0%. So the rate depends on **(mask, candidate set, criterion
+pair)** — three inputs, not two. That strengthens the conclusion rather than
+weakening it.
+
+**Consequence for exp3 and exp7**, both of which report exactly this quantity:
+the candidate set must be quoted with any number they produce and must match the
+set the selectors use, or the wall-clock result is not comparable to the counting
+result it exists to adjudicate. Widening the set can only add disagreements, so a
+small count from a narrow set is not evidence of a small effect. Both experiments
+now print their set with that warning attached.
+
+**One mask-level fact survived:** `docpack` is 0% in every candidate set tested,
+including sets where every other union mask disagrees. Worth keeping precisely
+because it is invariant to the thing that broke the other three conditions.
+
+### What the result reframes
+
+The interesting experiment is no longer "does tile shape matter" — exp0 answered
+that. It is **whether a hardware-calibrated model changes any selection
+decision.** exp3 already asks exactly this (it reports the element argmin and the
+wall-clock argmin per tile shape and flags every disagreement). If `p` moves an
+argmin, the selector must be hardware-aware, which is the strongest available
+form of novelty item 1: a contribution reproducible by neither element counting,
+nor a hand-written kernel, nor RCM. If no argmin moves, selection reduces to
+counting and the compiler framing weakens materially. Both answers are worth
+having and nobody knows which it is.
+
+**And the headline rests on an unmeasured assumption.** The permutation costs
+0.105 ms against a 0.122 ms kernel: per-layer it is 1.41× vs FlexAttention, once
+per forward it is 2.61×. §4 assumes once-per-forward; §5 lists that as *argued,
+not measured*. `gpu/exp5_amortisation.py` measures it over a depth sweep and
+checks the equivariance claim rather than assuming it — including the
+silent-failure case a reviewing session identified: **RoPE does not break
+equivariance, it requires that position ids travel with the tokens.** Permute the
+tokens and regenerate positions with `arange()` and the answer is wrong but
+numerically plausible. exp5 exercises RoPE with permuted positions *and* carries a
+negative control that regenerates them, which must fail — otherwise the check
+proves nothing about whether RoPE was exercised at all.
+
+**Scope: prefill only.** KV-cache append genuinely breaks the fork — new keys
+arrive in original order and would have to be inserted at permuted positions — so
+decode is neither covered nor claimed.
+
+**Everything above is one configuration** — one mask, one N, one head count, one
+D. Occupancy effects are exactly the kind of thing that move with all four.
 
 ---
 

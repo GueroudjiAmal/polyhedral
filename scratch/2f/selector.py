@@ -119,6 +119,21 @@ def cost_fold(D, N, s, BQ, A, shear=False):
             if hi - lo > 1 or lo % s:
                 return None
         for r, st, lo, hi in D.aps:
+            # The condition is that every element IN RANGE is divisible by s, not
+            # that the progression is. Requiring st % s == 0 is stricter than the
+            # maths whenever the range holds a single element: D = {8} written as
+            # (r=8, st=5, lo=8, hi=9) is foldable by 4 and this test refused it.
+            # Found by auditing against the oracle after b5 hit the same shape --
+            # a decline that no ordinary mask exercises, so it read as coverage.
+            first = max(lo, 0) + (r - max(lo, 0)) % st
+            last_el = min(hi, N) - 1
+            last_el -= (last_el - r) % st
+            if first > last_el:
+                continue                       # no elements in range: vacuous
+            if first == last_el:
+                if first % s:
+                    return None                # the one element must be divisible
+                continue
             if st % s or r % s:
                 return None
         W = dhi // s + 1

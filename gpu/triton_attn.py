@@ -59,7 +59,10 @@ def _attn_fwd(Q, K, V, O, KVI, KVN, KVP, PQ, PK,
               stride_vb, stride_vn, stride_ob, stride_on,
               scale, MAXKV,
               KIND: tl.constexpr, P0: tl.constexpr, P1: tl.constexpr, P2: tl.constexpr,
-              BQ: tl.constexpr, A: tl.constexpr, D: tl.constexpr):
+              WSEL, stride_wb, N_KV,
+              BQ: tl.constexpr, A: tl.constexpr, D: tl.constexpr,
+              GATHER_KV: tl.constexpr, GATHER_MULT: tl.constexpr,
+              GATHER_SCATTER: tl.constexpr):
     pid_m = tl.program_id(0)
     pid_b = tl.program_id(1)
 
@@ -88,7 +91,36 @@ def _attn_fwd(Q, K, V, O, KVI, KVN, KVP, PQ, PK,
         partial = tl.load(KVP + pid_m * MAXKV + j)
         offs_n = kvb * A + tl.arange(0, A)
 
-        k = tl.load(K + pid_b * stride_kb + offs_n[:, None] * stride_kn + offs_d[None, :])
+        # GATHER_KV isolates the ONE hardware term that differs by transform at a
+        # fixed tile shape: memory access. False = K/V physically permuted, rows
+        # read contiguously (class A). True = K/V left in place and rows gathered
+        # per tile (what class B must do, and cannot amortise). Same tiles, same
+        # element count, same output -- so any time difference IS the traffic term.
+        if GATHER_KV:
+            rows_n = tl.load(PK + offs_n)
+        else:
+            rows_n = offs_n
+        k = tl.load(K + pid_b * stride_kb + rows_n[:, None] * stride_kn + offs_d[None, :])
+        if GATHER_MULT > 1:
+            # Touch R = A*GATHER_MULT distinct rows to produce an A-wide tile,
+            # which is what class B must do (A + a*(BQ-1) rows, not A). Weights
+            # come from a RUNTIME tensor [1,0,0,...] so the extra loads cannot be
+            # eliminated as dead, and the arithmetic stays exact.
+            w0 = tl.load(WSEL + pid_b * stride_wb + 0)
+            k = k * w0
+            for r in tl.static_range(1, GATHER_MULT):
+                # CONTIGUOUS: extra rows follow the tile, so the row COUNT is paid
+                # and coalescing is kept. SCATTERED: they come through the
+                # permutation, so both are paid. The two sweeps bracket any class
+                # B configuration, and the distance between them is exactly the
+                # cache-residency question NOTES §5 could only speculate about.
+                if GATHER_SCATTER:
+                    extra = tl.load(PK + ((offs_n + r * A) % N_KV))
+                else:
+                    extra = (rows_n + r * A) % N_KV
+                kr = tl.load(K + pid_b * stride_kb
+                             + extra[:, None] * stride_kn + offs_d[None, :])
+                k = k + kr * tl.load(WSEL + pid_b * stride_wb + r)
         qk = tl.dot(q, tl.trans(k)) * scale
 
         # The kv index vector is loaded UNCONDITIONALLY even though only partial
@@ -134,7 +166,7 @@ def _attn_fwd(Q, K, V, O, KVI, KVN, KVP, PQ, PK,
         p = tl.exp(qk - m_new[:, None])
         l_i = l_i * alpha + tl.sum(p, 1)
         acc = acc * alpha[:, None]
-        v = tl.load(V + pid_b * stride_vb + offs_n[:, None] * stride_vn + offs_d[None, :])
+        v = tl.load(V + pid_b * stride_vb + rows_n[:, None] * stride_vn + offs_d[None, :])
         acc = tl.dot(p.to(v.dtype), v, acc)
         m_i = m_new
 
@@ -147,7 +179,9 @@ def _attn_fwd(Q, K, V, O, KVI, KVN, KVP, PQ, PK,
 
 def block_sparse_attention(q, k, v, kv_idx, kv_num, kv_partial,
                            kind, p0, p1, p2, BQ, A, scale=None,
-                           perm_q=None, perm_kv=None, num_warps=4, num_stages=2):
+                           perm_q=None, perm_kv=None, gather_kv=False,
+                           gather_mult=1, gather_scatter=True,
+                           num_warps=4, num_stages=2):
     """q,k,v: [BH, N, D] contiguous, fp16. Returns [BH, N, D].
 
     perm_q / perm_kv: int32 [N] mapping permuted position -> ORIGINAL position.
@@ -160,6 +194,10 @@ def block_sparse_attention(q, k, v, kv_idx, kv_num, kv_partial,
         perm_q = torch.arange(N, device=q.device, dtype=torch.int32)
     if perm_kv is None:
         perm_kv = perm_q
+    # [1, 0, 0, ...] per batch-head: keeps the extra gather loads alive without
+    # changing the result. Runtime values, so they cannot be constant-folded.
+    wsel = torch.zeros(BH, max(gather_mult, 1), device=q.device, dtype=q.dtype)
+    wsel[:, 0] = 1
     _assert_kinds_match()
     assert N % BQ == 0 and N % A == 0, "cost model and kernel both assume this"
     assert k.shape == v.shape == q.shape
@@ -172,7 +210,9 @@ def block_sparse_attention(q, k, v, kv_idx, kv_num, kv_partial,
             q.stride(0), q.stride(1), k.stride(0), k.stride(1),
             v.stride(0), v.stride(1), o.stride(0), o.stride(1),
             scale or D ** -0.5, kv_idx.shape[1],
-            KIND=kind, P0=p0, P1=p1, P2=p2, BQ=BQ, A=A, D=D,
+        wsel, wsel.stride(0), N,
+            KIND=kind, P0=p0, P1=p1, P2=p2, BQ=BQ, A=A, D=D, GATHER_KV=gather_kv,
+        GATHER_MULT=gather_mult, GATHER_SCATTER=gather_scatter,
             num_warps=num_warps, num_stages=stages,
         )
 
