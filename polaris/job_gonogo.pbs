@@ -21,26 +21,15 @@ set -euo pipefail
 cd "${PBS_O_WORKDIR:-$PWD}"
 mkdir -p logs results
 
-# The module name is DISCOVERED by setup.sh, not assumed here -- the site's
-# `conda` modulefile has been seen to fail dependency resolution while
-# `frameworks` works. env.generated.sh records whichever one actually loaded.
-if [ -f polaris/env.generated.sh ]; then
-  . polaris/env.generated.sh
-else
-  echo "FATAL: polaris/env.generated.sh missing -- run polaris/setup.sh on a LOGIN node first." >&2
-  exit 1
-fi
-
+# The module name and VERSION are recorded by setup.sh, not assumed here. The
+# site DEFAULT conda is broken (see below), so the pinned version matters.
+#
+# CORRECTION: an earlier version of this comment claimed `frameworks` works on
+# Polaris where `conda` does not. That was never verified -- `frameworks` is the
+# Aurora module name; the ALCF Polaris docs document `conda` only. The fallback
+# it justified produced a second, misleading failure. Do not re-add it.
 module use /soft/modulefiles
-module --ignore_cache load "${POLYATTN_MODULE:-conda}" || {
-  echo "FATAL: module load ${POLYATTN_MODULE:-conda} failed on the compute node" >&2
-  echo "       (it worked on the login node -- module stacks can differ)" >&2
-  exit 1
-}
 
-# conda's activate scripts reference unset variables; `set -u` turns that into
-# an immediate non-zero exit, which PBS reports only as a job that went straight
-# to E with an empty log. Disable -u across activation, restore after.
 # setup.sh records which conda module and venv actually worked on the login
 # node. Hard-coding either here is how a job fails in the queue the same way
 # setup.sh already failed interactively.
@@ -57,7 +46,7 @@ source polaris/env.generated.sh
 # so that is what we gate on. `module load` being fatal here was wrong: it made
 # a cosmetic failure look like a blocking one.
 set +u
-if ! module load "$POLYATTN_MODULE" 2>/tmp/.mod.$$; then
+if ! module --ignore_cache load "$POLYATTN_MODULE" 2>/tmp/.mod.$$; then
   echo "WARN: module load $POLYATTN_MODULE failed on the compute node:" >&2
   sed 's/^/      /' /tmp/.mod.$$ | tail -4 >&2
   echo "      continuing -- the venv is what matters. Gating on torch instead." >&2
@@ -71,6 +60,10 @@ if [ ! -f "$POLYATTN_VENV/bin/activate" ]; then
 fi
 source "$POLYATTN_VENV/bin/activate"
 set -u
+
+# Repair what the aborted conda modulefile did not finish (cray-mpich on
+# LD_LIBRARY_PATH, CUDA_HOME). No-op when the module loaded cleanly.
+set +u; . polaris/env_fixup.sh; set -u
 
 # THE REAL GATE. Nothing downstream means anything without these three.
 python - <<'PYGATE' || { echo "FATAL: environment unusable, see above." >&2; exit 3; }

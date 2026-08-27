@@ -91,7 +91,8 @@ command will name it.
 | **E** (exits at once) | `#PBS -o logs/` with no `logs/` directory. PBS resolves the output path *before* the script body runs, so a `mkdir` inside the job is too late. | fixed — `logs/` is in the repo and `setup.sh` creates it |
 | **E** (exits at once) | `set -euo pipefail` + `source .venv-polaris/bin/activate` when the venv does not exist, i.e. `setup.sh` was never run. Instant non-zero exit before anything runs. Separately, `set -u` breaks `conda activate`, whose scripts reference unset variables. | fixed — activation wrapped in `set +u`, explicit FATAL if the venv is missing |
 | **H** | `-l filesystems=home:eagle` when your allocation is on **grand**. Requesting a filesystem you cannot access is itself a hold. | **RESOLVED** — the repo lives under `/lus/eagle/projects/radix-io/...`, so `home:eagle` is correct as written. |
-| **E** on the login node, before any job | `module load conda` fails dependency resolution (`gcc-native/14.2`, `cray-hdf5-parallel/1.14.3.5` reported UNKNOWN), sometimes after Lmod auto-swaps `PrgEnv-nvidia` → `PrgEnv-gnu`. | fixed — `setup.sh` does `module reset`, then `module --ignore_cache load` across a fallback list, and records which name worked |
+| **E** on the login node, before any job | The site's conda modulefiles have a broken dependency chain: `conda/2025-09-25` (the DEFAULT) wants `gcc-native/14.2` and `cray-hdf5-parallel/1.14.3.5`; `conda/2024-04-29` wants `cray-hdf5-parallel/1.12.2.9`. All reported UNKNOWN, cache cleared, no change. | **not ours to fix** — belongs in a ticket to support@alcf.anl.gov. Everything here works around it. |
+| **E** in the job, after the module fix | `module load` was treated as FATAL. It only sets environment variables; whether the job can do anything is decided by the venv's interpreter. A cosmetic site failure was killing work that would otherwise run. | fixed — the module load is best-effort and warns; the job gates on `import torch` **and** `torch.cuda.is_available()` instead |
 
 `polaris/preflight.sh` checks all of these on a login node before you submit.
 
@@ -101,8 +102,8 @@ command will name it.
 `polaris/env.generated.sh`. The three job scripts **source that file** rather than
 hard-coding a name, and fail loudly if it is missing.
 
-This matters because the site's `conda` modulefile has been observed failing
-dependency resolution while other names work. Three `.pbs` files each assuming
+This matters because the site's DEFAULT conda is broken -- see the table below.
+It is the *version* that has to be pinned, not the name. Three `.pbs` files each assuming
 `conda` would have failed in the queue exactly the way `setup.sh` failed on the
 login node — with a queue wait in between.
 
@@ -110,7 +111,7 @@ If `setup.sh` cannot load anything, it prints `module avail` and stops. The two
 diagnostics worth running by hand at that point:
 
 ```bash
-module use /soft/modulefiles && module avail conda frameworks
+module use /soft/modulefiles && module avail conda   # versions, not just the default
 module spider gcc-native            # is the dependency it wants actually installed?
 ```
 
