@@ -50,15 +50,46 @@ if [ ! -f polaris/env.generated.sh ]; then
 fi
 source polaris/env.generated.sh
 
+# The module load is BEST EFFORT, deliberately. The site's default conda
+# modulefile can require dependency versions the system does not have, and that
+# failure is not ours to fix -- but it also does not have to stop the job. What
+# actually matters is that the venv's interpreter runs and torch sees the GPU,
+# so that is what we gate on. `module load` being fatal here was wrong: it made
+# a cosmetic failure look like a blocking one.
 set +u
-module load "$POLYATTN_MODULE"
-conda activate base
+if ! module load "$POLYATTN_MODULE" 2>/tmp/.mod.$$; then
+  echo "WARN: module load $POLYATTN_MODULE failed on the compute node:" >&2
+  sed 's/^/      /' /tmp/.mod.$$ | tail -4 >&2
+  echo "      continuing -- the venv is what matters. Gating on torch instead." >&2
+fi
+rm -f /tmp/.mod.$$
+conda activate base 2>/dev/null || true
+
 if [ ! -f "$POLYATTN_VENV/bin/activate" ]; then
   echo "FATAL: venv $POLYATTN_VENV missing -- re-run polaris/setup.sh." >&2
   exit 2
 fi
 source "$POLYATTN_VENV/bin/activate"
 set -u
+
+# THE REAL GATE. Nothing downstream means anything without these three.
+python - <<'PYGATE' || { echo "FATAL: environment unusable, see above." >&2; exit 3; }
+import sys
+try:
+    import torch
+except Exception as e:
+    print(f"FATAL: import torch failed: {type(e).__name__}: {e}")
+    if "libmpi" in str(e) or "cray" in str(e).lower():
+        print("       Cray MPI, not CUDA. base's torch is tied to a retired PrgEnv.")
+        print("       Re-run setup.sh on a login node; it will shadow it with a wheel.")
+    sys.exit(1)
+if not torch.cuda.is_available():
+    print(f"FATAL: torch {torch.__version__} imports but sees no GPU "
+          f"(torch.version.cuda={torch.version.cuda})")
+    sys.exit(1)
+print(f"gate OK: torch {torch.__version__}  cuda {torch.version.cuda}  "
+      f"{torch.cuda.get_device_name(0)}")
+PYGATE
 
 # Documented Polaris known issue: software that creates socket files under
 # TMPDIR hits "AF_UNIX path too long", and ALCF names pytorch specifically.
