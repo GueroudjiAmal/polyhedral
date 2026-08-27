@@ -88,3 +88,49 @@ def test_a_fully_dead_query_row_returns_zero():
     M[5] = False
     got = _kernel_math(M, q, k, v, 128, 128, -1e30)
     assert np.isfinite(got).all() and np.abs(got[5]).max() == 0.0
+
+
+def test_triton_call_site_matches_the_kernel_signature():
+    """A signature/call mismatch is a RUNTIME binding error in Triton, so
+    py_compile passes and the GPU job dies at the first launch.
+
+    That is what happened: `WSEL, stride_wb, N_KV` were inserted AFTER the
+    constexpr block in the signature while the call passes them BEFORE it, so
+    `wsel` bound to KIND's positional slot and `KIND=kind` then collided --
+    "got multiple values for argument 'KIND'". A queue slot found it; this test
+    would have, and it needs no GPU.
+
+    Checks that the count of positional (non-constexpr) parameters equals the
+    count of positional arguments at the call site, and that every constexpr
+    parameter is passed by keyword.
+    """
+    import ast
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[1] / "gpu" / "triton_attn.py"
+    tree = ast.parse(src.read_text())
+
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_attn_fwd")
+    positional = [a.arg for a in fn.args.args if a.annotation is None]
+    constexpr = {a.arg for a in fn.args.args if a.annotation is not None}
+
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Subscript)
+             and getattr(n.func.value, "id", None) == "_attn_fwd"]
+    assert calls, "no _attn_fwd[grid](...) launch found"
+    for c in calls:
+        kw = {k.arg for k in c.keywords if k.arg not in ("num_warps", "num_stages")}
+        assert len(c.args) == len(positional), (
+            f"{len(c.args)} positional args vs {len(positional)} positional "
+            f"params -- an argument will bind to a constexpr slot")
+        assert kw == constexpr, (
+            f"constexpr params passed positionally or missing: "
+            f"{constexpr ^ kw}")
+
+    # and the interleave that caused it: positional params must not be split by
+    # constexpr ones, or the call site and signature can drift again
+    kinds = ["C" if a.annotation is not None else "P" for a in fn.args.args]
+    assert "".join(kinds).rstrip("C").count("C") == 0, (
+        "positional and constexpr parameters are interleaved; keep all "
+        "positional params first so the call site cannot silently mis-bind")

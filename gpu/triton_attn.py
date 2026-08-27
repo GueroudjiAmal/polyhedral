@@ -57,9 +57,8 @@ def _live(d, KIND: tl.constexpr, P0: tl.constexpr, P1: tl.constexpr, P2: tl.cons
 def _attn_fwd(Q, K, V, O, KVI, KVN, KVP, PQ, PK,
               stride_qb, stride_qn, stride_kb, stride_kn,
               stride_vb, stride_vn, stride_ob, stride_on,
-              scale, MAXKV,
+              scale, MAXKV, WSEL, stride_wb, N_KV,
               KIND: tl.constexpr, P0: tl.constexpr, P1: tl.constexpr, P2: tl.constexpr,
-              WSEL, stride_wb, N_KV,
               BQ: tl.constexpr, A: tl.constexpr, D: tl.constexpr,
               GATHER_KV: tl.constexpr, GATHER_MULT: tl.constexpr,
               GATHER_SCATTER: tl.constexpr):
@@ -210,9 +209,9 @@ def block_sparse_attention(q, k, v, kv_idx, kv_num, kv_partial,
             q.stride(0), q.stride(1), k.stride(0), k.stride(1),
             v.stride(0), v.stride(1), o.stride(0), o.stride(1),
             scale or D ** -0.5, kv_idx.shape[1],
-        wsel, wsel.stride(0), N,
+            wsel, wsel.stride(0), N,
             KIND=kind, P0=p0, P1=p1, P2=p2, BQ=BQ, A=A, D=D, GATHER_KV=gather_kv,
-        GATHER_MULT=gather_mult, GATHER_SCATTER=gather_scatter,
+            GATHER_MULT=gather_mult, GATHER_SCATTER=gather_scatter,
             num_warps=num_warps, num_stages=stages,
         )
 
