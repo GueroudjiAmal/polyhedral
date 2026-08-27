@@ -91,10 +91,19 @@ def _attn_fwd(Q, K, V, O, KVI, KVN, KVP, PQ, PK,
         k = tl.load(K + pid_b * stride_kb + offs_n[:, None] * stride_kn + offs_d[None, :])
         qk = tl.dot(q, tl.trans(k)) * scale
 
-        # Only PARTIAL tiles pay for masking -- the same three-way split
-        # FlexAttention's BlockMask makes, and the thing NOTES sec 3 measures.
+        # The kv index vector is loaded UNCONDITIONALLY even though only partial
+        # tiles use it. A tl.load inside a runtime `if` cannot be software
+        # pipelined -- Triton fails with "operation scheduled before its
+        # operands" -- and dropping num_stages to 1 to work around that would
+        # slow every tile, which is the wrong trade in a kernel whose entire
+        # purpose is a timing. This load is A int32s against a BQ*A tile, so
+        # hoisting it costs essentially nothing.
+        pk = tl.load(PK + offs_n)
+
+        # Only PARTIAL tiles pay for the BQ*A predicate evaluation -- the same
+        # three-way split FlexAttention's BlockMask makes, and the thing
+        # NOTES sec 3 measures. This branch must stay conditional.
         if partial != 0:
-            pk = tl.load(PK + offs_n)
             d = pq[:, None] - pk[None, :]
             qk = tl.where(_live(d, KIND, P0, P1, P2), qk, -float("inf"))
 
@@ -134,12 +143,35 @@ def block_sparse_attention(q, k, v, kv_idx, kv_num, kv_partial,
     assert k.shape == v.shape == q.shape
     o = torch.empty_like(q)
     grid = (N // BQ, BH)
-    _attn_fwd[grid](
-        q, k, v, o, kv_idx, kv_num, kv_partial, perm_q, perm_kv,
-        q.stride(0), q.stride(1), k.stride(0), k.stride(1),
-        v.stride(0), v.stride(1), o.stride(0), o.stride(1),
-        scale or D ** -0.5, kv_idx.shape[1],
-        KIND=kind, P0=p0, P1=p1, P2=p2, BQ=BQ, A=A, D=D,
-        num_warps=num_warps, num_stages=num_stages,
-    )
+
+    def _launch(stages):
+        _attn_fwd[grid](
+            q, k, v, o, kv_idx, kv_num, kv_partial, perm_q, perm_kv,
+            q.stride(0), q.stride(1), k.stride(0), k.stride(1),
+            v.stride(0), v.stride(1), o.stride(0), o.stride(1),
+            scale or D ** -0.5, kv_idx.shape[1],
+            KIND=kind, P0=p0, P1=p1, P2=p2, BQ=BQ, A=A, D=D,
+            num_warps=num_warps, num_stages=stages,
+        )
+
+    try:
+        _launch(num_stages)
+    except Exception as e:
+        # The pipeliner can refuse a (BQ, A) it cannot schedule. Falling back to
+        # num_stages=1 keeps the run alive, but it is NOT the same kernel: no
+        # software pipelining means every timing from this configuration is
+        # pessimistic and must not be compared against a pipelined one. Say so
+        # loudly rather than silently producing a slower number.
+        if "scheduled before its operands" not in str(e):
+            raise
+        key = (kind, BQ, A, num_warps)
+        if key not in _PIPELINE_FALLBACK:
+            _PIPELINE_FALLBACK.add(key)
+            print(f"  WARNING: Triton could not pipeline kind={kind} {BQ}x{A} "
+                  f"num_warps={num_warps}; retrying num_stages=1. "
+                  f"TIMINGS FOR THIS CONFIG ARE NOT COMPARABLE.", flush=True)
+        _launch(1)
     return o
+
+
+_PIPELINE_FALLBACK = set()
