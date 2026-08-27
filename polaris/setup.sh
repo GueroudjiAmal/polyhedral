@@ -24,55 +24,60 @@ case "$REPO" in
            echo "   Consider /eagle/<project>/$USER or /grand/<project>/$USER instead." ;;
 esac
 
-# --- module stack -------------------------------------------------------
-# EXACTLY the sequence in the ALCF docs (Polaris > Data Science > Python and
-# > PyTorch). Nothing invented:
-#     module use /soft/modulefiles
-#     module load conda
-#     conda activate base
+# --- how we get a Python ------------------------------------------------
+# --pip-torch DELIBERATELY DOES NOT NEED THE conda MODULE.
 #
-# Two things were previously here and are gone on purpose:
-#   * `module reset` -- not in the docs, and on a Cray PE it can drop the very
-#     modules (cray-mpich, cray-hdf5) the conda build links against.
-#   * a `frameworks` fallback -- that is the Aurora module name. Polaris uses
-#     `conda`. Trying it here only produced a misleading second failure.
-module use /soft/modulefiles
+# The documented Polaris flow is `module use /soft/modulefiles; module load
+# conda; conda activate base`. That is what the default path below does. But the
+# site's default conda modulefile can require dependency VERSIONS that are not
+# installed (observed: conda/2025-09-25 wants gcc-native/14.2 and
+# cray-hdf5-parallel/1.14.3.5 while the system provides gcc-native/14). No user
+# action fixes that -- it is a site-side mismatch and belongs in a ticket.
+#
+# So --pip-torch bootstraps from ANY python3 already on PATH and builds a CLEAN
+# venv. It needs no module, and it drops the conda torch entirely, which also
+# drops that build's cray-mpich dependency (libmpi_gnu_NNN.so). Nothing in gpu/
+# uses MPI; every run is single-GPU.
+PIP_TORCH=0
+for a_ in "$@"; do [ "$a_" = "--pip-torch" ] && PIP_TORCH=1; done
 
-if ! module load conda 2>/tmp/.modload.$$; then
-  cat /tmp/.modload.$$ >&2
-  cat >&2 <<'HINT'
+if [ "$PIP_TORCH" = "1" ]; then
+  BOOTSTRAP_PY="$(command -v python3 || command -v python || true)"
+  [ -n "$BOOTSTRAP_PY" ] || { echo "FATAL: no python3 on PATH at all." >&2; exit 1; }
+  echo "== --pip-torch: bootstrapping from $BOOTSTRAP_PY (no module required)"
+  "$BOOTSTRAP_PY" -c 'import sys; assert sys.version_info>=(3,9), sys.version; print("   ", sys.version.split()[0])'
+  LOADED_MODULE="none (--pip-torch)"
+else
+  module use /soft/modulefiles
+  if ! module load conda 2>/tmp/.modload.$$; then
+    cat /tmp/.modload.$$ >&2; rm -f /tmp/.modload.$$
+    cat >&2 <<'HINT'
 
 FATAL: `module load conda` failed.
 
-If it reported a dependency as UNKNOWN (cray-hdf5-parallel, gcc-native, ...)
-that dependency almost certainly EXISTS -- Lmod is reading a stale user cache
-written before a site software update. Lmod says so itself in the error text.
-Clear it and start a fresh shell:
+First establish whether the dependency actually exists:
 
-    rm -rf ~/.lmod.d/.cache ~/.cache/lmod
-    module --ignore_cache spider conda        # confirm which versions are real
-    module use /soft/modulefiles && module load conda
-
-If you have a saved module collection it can pin retired modules too:
-
-    module savelist        # if a "default" exists and you did not want it:
-    module disable default
-
-Only if a specific conda version is genuinely broken site-side, pick another:
-
+    module --ignore_cache spider gcc-native
+    module --ignore_cache spider cray-hdf5-parallel
     module --ignore_cache avail conda
 
-HINT
-  rm -f /tmp/.modload.$$
-  exit 1
-fi
-rm -f /tmp/.modload.$$
+If it EXISTS at the required version, your Lmod cache is stale:
+    rm -rf ~/.lmod.d/.cache ~/.cache/lmod     # then a fresh shell
 
-set +u                       # conda's activate scripts trip `set -u`
-conda activate base
-set -u
-python -c 'import sys; print("   python", sys.version.split()[0], sys.executable)'
-LOADED_MODULE=conda
+If it DOES NOT exist, the site's modulefile is broken -- not fixable from here.
+Report it to support@alcf.anl.gov, and meanwhile skip the module entirely:
+
+    bash polaris/setup.sh --pip-torch
+
+HINT
+    exit 1
+  fi
+  rm -f /tmp/.modload.$$
+  set +u
+  conda activate base
+  set -u
+  LOADED_MODULE=conda
+fi
 
 # TWO WAYS TO GET TORCH. Default is the module's build; --pip-torch is the
 # escape hatch when the module's build is unusable.
@@ -89,12 +94,9 @@ LOADED_MODULE=conda
 #                      single-GPU (select=1, CUDA_VISIBLE_DEVICES=0) and nothing
 #                      in gpu/ calls MPI. Costs a ~2.5GB download through the
 #                      ALCF proxy; must match the compute-node driver.
-PIP_TORCH=0
-for a in "$@"; do [ "$a" = "--pip-torch" ] && PIP_TORCH=1; done
-
 if [ "$PIP_TORCH" = "1" ]; then
   echo "== building a CLEAN venv with torch from PyPI (no Cray MPI)"
-  [ -d .venv-polaris ] || python -m venv .venv-polaris
+  [ -d .venv-polaris ] || "$BOOTSTRAP_PY" -m venv .venv-polaris
   source .venv-polaris/bin/activate
   python -m pip install --upgrade pip
   python -m pip install torch --index-url https://download.pytorch.org/whl/cu124

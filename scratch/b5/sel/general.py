@@ -122,7 +122,15 @@ def _perm_intervals(ivs, s, N):
     return out
 
 
+def _require_divisible(N, BQ, A):
+    if N % BQ or N % A:
+        raise NotImplementedError(
+            f"ragged N unsupported: N={N} not divisible by BQ={BQ} and A={A}. "
+            "Partial edge tiles would be billed in full (~1% over-count).")
+
+
 def cost_identity(m, N, BQ, A):
+    _require_divisible(N, BQ, A)
     tot = 0
     for q0 in range(0, N, BQ):
         tot += BQ * A * count_blocks(m.cols(q0, q0 + BQ, 1, N), A, N)
@@ -146,6 +154,7 @@ def cost_residue_perm(m, N, BQ, A, s):
 
 
 def cost_shear(m, N, BQ, A):
+    _require_divisible(N, BQ, A)
     jmin, jmax = None, None
     per_block = []
     for q0 in range(0, N, BQ):

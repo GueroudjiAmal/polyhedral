@@ -6,7 +6,28 @@ What every one of my test inputs shared, that I never wrote down:
   C. sinks always had g < w.
   D. docpack documents always longer than a tile.
   E. N always divisible by the fold depth s.
-Each is varied here.
+
+LABEL AUDIT (added after d4 built verify_probes() on the shared artifact; the
+rule is that a probe must be shown to EXHIBIT the property its label names, not
+merely to run):
+
+  A  VERIFIED   signed sets really do contain negative offsets.
+  B  MISLEADING as read, accurate as written. "Non-power-of-two N" is true --
+     768/1152/1536 are not powers of two -- but all three are divisible by 128,
+     so the probe never produced a RAGGED cell and its `if N % BQ or N % A:
+     continue` is dead code (27 cells, fired 0 times). I later read this probe
+     as covering raggedness. It does not, and raggedness was untested until
+     _t_ragged.py, which found the engine wrong in 444/444 cells.
+  C  VERIFIED   g > w cases really do have g > w.
+  D  VERIFIED   documents really are shorter than the fold depth.
+  E  VACUOUS    "N not divisible by the fold depth s" is exactly backwards.
+     cost_residue_perm returns None when N % s != 0, so those cells are never
+     scored: at N=1000 only s in {2,4,8} score (N%s==0) and s in {3,6,12,16,32}
+     decline. EVERY scored cell has s dividing N. The probe cannot exhibit its
+     own property, by construction.
+
+Kept both, relabelled rather than deleted, because the mislabelling is the
+finding. B is renamed to what it tests; E is marked vacuous in place.
 """
 import sys
 sys.path.insert(0, "/home/agueroudji/Work/Polyhedral_sparce/scratch/b5/sel")
@@ -41,7 +62,7 @@ for pieces, nm in [([Iv(-64, 64)], "signed-band-64"),
                     chk(f"A:{nm}:{c}", dcost(c, DiagSpec(pieces), N, BQ, A),
                         oracle_cost(pieces, N, BQ, A, c))
 
-print("B. NON-POWER-OF-TWO N, transform suite")
+print("B. N not a power of two (NOT ragged -- all are 128-divisible; see label audit)")
 for pieces, nm in [([Iv(0, 128)], "band128"), ([Iv(0, 32), Iv(100, 132)], "twoband-mis"),
                    ([Ap(0, 8, 96)], "lattice-8")]:
     for N in (768, 1536, 1152):
@@ -91,7 +112,7 @@ for b, nm in [(list(range(0, 1024, 8)), "docs-of-8"),
             for A in TIL:
                 chk(f"D:{nm}:{c}", G.cost_of(c, sp, N, BQ, A), tiles_cost(Mt, BQ, A))
 
-print("E. N NOT divisible by the fold depth s")
+print("E. VACUOUS -- claims N indivisible by fold depth; only divisible cells score")
 for N in (1000, 1500):
     for g_, w_ in [(4, 256)]:
         M0 = dsink(g_, w_, N); sp = G.Sinks(g_, w_)

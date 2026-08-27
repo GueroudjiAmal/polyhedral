@@ -91,6 +91,20 @@ class DiagSpec:
 
     # --- cost -------------------------------------------------------------
     def cost(self, N, BQ, A):
+        """Exact ONLY when BQ | N and A | N.
+
+        The n(v) reorganisation bills BQ*A for every live tile. At ragged N the
+        final row-block and column-block are partial, and the oracle bills the
+        trailing strip at its true width, so this over-counts by ~1%. It used to
+        return that wrong number SILENTLY; it now refuses. Ragged N is exactly
+        the regime 2f's padded-extent refinement is about, and it is also the
+        regime the Triton kernel asserts away -- so it is modelled by nobody and
+        implemented by nobody. Named in the limitations rather than papered over.
+        """
+        if N % BQ or N % A:
+            raise NotImplementedError(
+                f"ragged N unsupported: N={N} not divisible by BQ={BQ} and A={A}. "
+                "Cost would be over-counted ~1% by billing partial edge tiles in full.")
         g = gcd(BQ, A)
         lo, hi = self.span()
         if hi < lo:

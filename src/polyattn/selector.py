@@ -130,6 +130,23 @@ def _cost_residue_perm(runs, N, s, BQ, A):
     return total
 
 
+class RaggedNotSupported(NotImplementedError):
+    """Raised rather than returning a number that is quietly ~1% wrong.
+
+    At ragged N the final row-block and column-block are partial, and the
+    closed forms here bill a full BQ*A per live tile. `tile_cost` guarded on
+    divisibility from the start; the class B staircase functions did NOT, and
+    `N // BQ` truncated silently -- so at ragged N the only candidates that
+    costed at all were class B, and the selector preferred the traffic-heavy
+    transform at every ragged sequence length (measured regret up to 1.265 on
+    element count alone, before any traffic term).
+
+    Refusing beats approximating: the regime is modelled by nobody and
+    implemented by nobody, and a loud gap is better than a quiet number no one
+    knows to distrust. See NOTES sec 5e and selector_oracle.uncovered_regimes().
+    """
+
+
 def _staircase(dvals, N, BQ, A, width, col_of):
     """Shared cost for class B, which produces an N x width staircase matrix.
 
@@ -165,6 +182,8 @@ def _expand(runs, cap=1 << 22):
 
 def _cost_shear(runs, N, BQ, A):
     """kv' = kv - q. transforms.t_shear indexes columns as maxD - d."""
+    if N % BQ:
+        raise RaggedNotSupported(f"shear at ragged N={N} with BQ={BQ}")
     d = _expand(runs)
     if d is None:
         return None
@@ -174,6 +193,8 @@ def _cost_shear(runs, N, BQ, A):
 
 def _cost_stridefold(runs, N, s, BQ, A):
     """kv' = (q - kv)/s. Applicable only if every offset is a multiple of s."""
+    if N % BQ:
+        raise RaggedNotSupported(f"stridefold at ragged N={N} with BQ={BQ}")
     d = _expand(runs)
     if d is None or d[0] < 0 or np.any(d % s):
         return None
@@ -188,6 +209,12 @@ CANDIDATES = (["identity", "shear"]
 
 def costs(mask, N, BQ, A, runs=None):
     """{candidate: predicted elements} from the predicate alone."""
+    if N % BQ or N % A:
+        raise RaggedNotSupported(
+            f"N={N} is not divisible by BQ={BQ} and A={A}. Every closed form "
+            "here bills a full BQ*A per live tile, which over-charges the "
+            "partial trailing blocks. Refusing rather than returning a number "
+            "that is quietly wrong -- see NOTES sec 5e.")
     runs = offsets_of(mask, N) if runs is None else runs
     if runs is None:
         return None                                  # not diagonally invariant

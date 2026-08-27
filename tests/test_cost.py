@@ -305,3 +305,87 @@ def test_symmetry_extends_to_non_square_domains():
                     w1 = transforms.tile_stats(M, a, b)[1] / live
                     w2 = transforms.tile_stats(M, b, a)[1] / live
                     assert abs(w1 - w2) < 1e-12, f"{Nq}x{Nkv} {a}/{b}"
+
+
+def test_contested_filter_excludes_ties_by_construction():
+    """docs/NOTES.md §5j. A class-A/class-B tie has best == second-best, so
+    margin == 0, so a strict `> margin` filter drops it at every level including
+    0%. That is what makes the contested metric immune to the tie convention --
+    a `>=` filter would keep ties and destroy the property."""
+    from polyattn import selector_oracle as so
+    m = masks.Dilated(8)
+    best, costs = so.oracle(m, 1024, 16, 16)
+    best_a, _ = so.oracle(m, 1024, 16, 16, prefer_class_a=True)
+    assert best != best_a, "this mask must exhibit the tie"
+    assert costs[best] == costs[best_a], "and the tie must be exact"
+    assert so.margin(costs, best) == 0.0, "so the margin is zero"
+    assert not (so.margin(costs, best) > 0.0), "and a strict filter drops it"
+
+
+def test_symmetry_holds_exactly_when_padded_extents_agree():
+    """docs/NOTES.md §5e. The sharpest form of the hypothesis, and the only one
+    that predicts ragged sequence lengths -- which is what real models use.
+
+    N=1023 at 128x16 pads to 1024 and 1024 and IS symmetric; N=1000 pads to 1024
+    and 1008 and is NOT. Tested as a biconditional: a `predicted asymmetric but
+    symmetric` cell would weaken it, a `predicted symmetric but asymmetric` cell
+    would falsify it.
+
+    Caveat pinned with the property: this is about tile_stats's ZERO-PADDING
+    convention, not about attention. The Triton kernel asserts divisibility and
+    never sees a ragged tail.
+    """
+    from math import ceil
+    import numpy as np
+    from polyattn import transforms
+    dims = (128, 64, 32, 16)
+    for N in (500, 1000, 1023, 1536):
+        q = np.arange(N)[:, None]
+        kv = np.arange(N)[None, :]
+        for M in ((kv <= q), (kv <= q) & (q - kv < 128),
+                  (kv <= q) & ((q - kv) % 8 == 0)):
+            live = int(M.sum())
+            for a in dims:
+                for b in dims:
+                    predicted = ceil(N / a) * a == ceil(N / b) * b
+                    w1 = transforms.tile_stats(M, a, b)[1] / live
+                    w2 = transforms.tile_stats(M, b, a)[1] / live
+                    assert (abs(w1 - w2) < 1e-12) == predicted, \
+                        f"N={N} {a}x{b}: predicted sym={predicted}"
+
+
+def test_selector_refuses_ragged_N_instead_of_guessing():
+    """docs/NOTES.md §5e. Before this guard, tile_cost (identity, class A)
+    correctly declined at ragged N but the class B staircase functions did not --
+    `N // BQ` truncated silently. So the ONLY candidates that costed at all were
+    class B, and the selector preferred the traffic-heavy transform at every
+    ragged sequence length. Measured regret up to 1.265 on element count alone,
+    before any traffic term.
+
+    Refusing beats approximating: nobody models or implements this regime.
+    """
+    from polyattn import selector
+    for N in (500, 1000, 1023):
+        for BQ, A in ((128, 128), (128, 16)):
+            with pytest.raises(selector.RaggedNotSupported):
+                selector.select(masks.SlidingWindow(128), N, BQ, A)
+            with pytest.raises(selector.RaggedNotSupported):
+                selector.select(masks.Dilated(8), N, BQ, A)
+    # divisible N still works
+    assert selector.select(masks.Dilated(8), 1024, 128, 128) == "residue-perm-8"
+
+
+def test_every_probe_exhibits_the_property_it_claims():
+    """docs/NOTES.md §7b. Strictly stronger than checking a probe RAN.
+
+    A reviewing session had two probes labelled 'non-power-of-two N' and 'N not
+    divisible by the fold depth' which between them produced zero cells with
+    either property -- the N values chosen were all divisible by every tile, so
+    the labels were aspirational. An unverified label is worse than no label:
+    it is what makes the set look comprehensive.
+    """
+    from polyattn import selector_oracle as so
+    res = so.verify_probes(verbose=False)
+    bad = {n: why for n, (ok, why) in res.items() if not ok}
+    assert not bad, f"probes not exhibiting their named property: {bad}"
+    assert set(res) == set(so.PROBES), "every PROBES entry needs a verifier"

@@ -779,6 +779,41 @@ Hypotheses: the mask is exactly `{q−kv ∈ D}` on the full square, and `N` div
 by `BQ` and `A` — which `cost.cost` already asserts, so it is free. **Nothing about
 `D`.**
 
+#### The hypothesis is weaker still: the PADDED EXTENTS must agree
+
+Three statements, each weaker than the last, all now checked rather than relayed:
+
+| | condition | status |
+|---|---|---|
+| original | `BQ \| N` and `A \| N` | sufficient, unnecessarily strong |
+| this session | divisibility rather than *squareness* is load-bearing — both tile sizes dividing both dimensions forces the shift to be a multiple of the tile, which is what extends the theorem to **rectangular** domains | verified here |
+| sharpest | `ceil(N/BQ)·BQ == ceil(N/A)·A` — the two **padded extents** agree | verified here, 512/512 |
+
+Tested as a **biconditional** on this session's own code, N ∈ {500, 777, 900,
+1000, 1023, 1200, 1536, 2048} × four mask families × all 16 tile pairs:
+
+> predicted symmetric **and** symmetric **352** · predicted asymmetric **and**
+> asymmetric **160** · predicted symmetric **but** asymmetric **0** · predicted
+> asymmetric **but** symmetric **0**
+
+It matters because **real sequence lengths are not multiples of 128**, and it is
+the only one of the three that predicts the ragged rows: `N=1023` with 128×16
+pads to 1024 and 1024 and *is* symmetric; `N=1000` pads to 1024 and 1008 and is
+*not*. Neither of the first two statements predicts either.
+
+**Three caveats, all load-bearing:**
+
+1. The **forward** direction follows from the reflection argument applied to the
+   padded square, so it is proved. The **converse is empirical** — 512 cells here
+   plus 128 from another session — and nobody has proved it.
+2. It is a property of **`tile_stats`'s zero-padding convention**, not of
+   attention. A kernel that masks a ragged tail instead of padding it may behave
+   differently, and no one has checked what real kernels do.
+3. **This project's own kernel never exercises it.** `block_sparse_attention`
+   asserts `N % BQ == 0 and N % A == 0`, so the model and the kernel agree only
+   where both are divisible. The ragged case is modelled and unimplemented — it
+   belongs with decode (`N_q = 1`) in `uncovered_regimes()`, not in the results.
+
 Verified as exact **integers** rather than ratios (a ratio can hide a small
 asymmetry), all 16 cells, `max |elems(BQ,A) − elems(A,BQ)|`:
 
@@ -1171,6 +1206,109 @@ some context length while an exact evaluator handles it for free.
 
 ---
 
+## §5j — Two fixes for one metric problem, kept both
+
+§5h found that the shared element-count metric cannot distinguish a free class A
+permutation from a class B transform needing 8× the memory traffic — they are
+*exactly* tied on elements — and that it therefore penalises a selector which
+prefers the free one. Two independent remedies now exist and they answer
+different questions, so both are in `selector_oracle`:
+
+**`oracle(..., prefer_class_a=True)`** breaks ties toward the free transform and
+is reported alongside the candidate-order convention rather than replacing it.
+It answers *which transform got shipped on a tie*, which is the part that matters
+for traffic and which no element count can see. The default was not switched:
+changing the shared convention mid-comparison would silently reprice every number
+the three sessions had already reported.
+
+**The contested-cell filter** — score only cells where the oracle's best beats its
+second-best by more than a margin — answers *is the accuracy number being carried
+by cells where any answer is right*.
+
+The reviewing session noticed the property that makes the second one cleaner, and
+did not design it in: **the filter is immune to the tie artefact by
+construction.** A class-A/class-B tie means `best == second_best`, so the margin
+is zero, so the cell is excluded at any margin above zero. Every disagreement
+between the two tie conventions is exactly such a cell. Where the conventions
+disagree, the element-count metric has nothing to say, and the filter drops the
+cell rather than scoring it under a rule someone had to choose.
+
+Their diagonal family: 100% agreement at every margin to 20%, with 193 cells
+where the best beats second-best by more than 20% and zero wrong picks among
+them — so their figure is not carried by ties or by easy cells.
+
+### This session's numbers, on the enlarged test set — materially worse
+
+882 instances (42 masks × 3 N × 7 tile shapes):
+
+| | |
+|---|---|
+| agreement, candidate-order ties | **85.1%** (751/882) |
+| agreement, class-A-preferring ties | **89.1%** (786/882) |
+| class A/B ties in the cost function | **226 (25.6%)** |
+| regret | mean **1.2355**, max **10.6667** |
+| worst case | docpack-8m2, N=1536, 128×128: picked identity, best shear |
+
+**This supersedes §5f's 97.9% / 1.0005 / 1.0562.** Nothing about the selector
+changed except the tie-break; the *test set* did — it grew from 34 to 42 masks
+with the short-document docpack probes and the `w < s` sinks cases added after
+§5g. The earlier figures were measured on a set that excluded the regimes now
+known to be hardest. That is the §5g correction arriving in the aggregate, and
+the aggregate moved a long way: mean regret 1.0005 → 1.2355, max 1.06 → 10.67.
+
+The 4-point gap between the two tie conventions is §5h's artefact, quantified
+here: a quarter of all cells are ties the element count cannot resolve.
+
+### The contested-cell breakdown, and it does not say what b5's did
+
+| margin | cells | agreement | mean regret | max regret |
+|---|---|---|---|---|
+| 0% | 648 | 85.2% | 1.3205 | 10.67 |
+| 1% | 621 | 87.0% | 1.3343 | 10.67 |
+| 5% | 531 | 88.3% | 1.3901 | 10.67 |
+| 20% | 373 | 83.9% | **1.5551** | 10.67 |
+
+Agreement holds up — it is not carried by cells where any answer is right, which
+is what the filter was for. **But regret rises monotonically with margin:
+1.32 → 1.56.** Where the decision matters most, this selector is worst. That is
+the opposite of the reviewing session's result on their diagonal family, and the
+reason is visible by family:
+
+| family | agreement | mean regret |
+|---|---|---|
+| causal, custom, local+strided, prefix-lm, sinks+window, two-band, window | 100% | 1.0000 |
+| dilated | **44.4%** | **1.0000** |
+| doc-packed-bidir | 71.4% | 1.6223 |
+| doc-packed | **25.7%** | **2.6046** |
+
+**The family table is computed on the OVERALL set, not the contested one** — a
+distinction the reviewing session caught from an arithmetic tension in the two
+numbers as first reported, and which changes what the `dilated` row means.
+Verified directly rather than inferred:
+
+> `dilated` — 63 cells, 35 disagreements, **all 35 are ties, 0 are not.**
+
+So `dilated` at 44.4% with regret exactly 1.0000 is the tie artefact in its purest
+form: every disagreement is `residue-perm-s` against `stridefold-s` at identical
+element cost — the selector shipping the free transform, the candidate-order
+oracle naming the traffic-heavy one. That row measures the metric, not the
+selector.
+
+The arithmetic closes: 882 cells at 85.1% is 131 disagreements; the two tie
+conventions differ by 4.0 points, i.e. ~35 cells; the contested filter (`gap > 0`
+strictly, so ties are excluded by construction) drops 234 cells and exactly 35
+disagreements. **All 35 tie-disagreements in the entire set are `dilated`, and the
+contested table's 96 disagreements contain none of them.**
+
+That makes the contested numbers *cleaner* than first credited: at every margin
+they are real disagreements, concentrated in `doc-packed`.
+
+`doc-packed` at 25.7% with mean regret 2.60 is the real weakness, and it is the
+declared fallback (§5g) doing badly rather than any mis-costing. Everything the
+method actually covers scores 100% with regret 1.0000.
+
+---
+
 ## §6 — Where the project stands
 
 **Established (analytically, exactly, validated against brute force):**
@@ -1409,6 +1547,18 @@ testing; it also caught the two that no test set any of the three sessions wrote
 could have seen, because all three of us think of documents as long and of
 windows as wide.
 
+**A guard applied unevenly across alternatives does not degrade the answer, it
+BIASES it.** The sharpest diagnosis of the day, and it is about this session's
+ragged-N bug. `tile_cost` (identity, class A) guarded on divisibility; the class B
+staircase functions did not, and `N // BQ` truncated silently. A guard missing
+from *all* candidates would have produced noise; missing from *half* of them, it
+selectively silenced the class A candidates and left only the wrong ones
+standing, so the selector recommended class B — the exact class §4 exists to warn
+against — at every ragged sequence length.
+
+The transferable form: the question to ask is not *which functions lack guards*
+but **which guards are inconsistent between things that get compared.**
+
 **A second instrument, for a different class of defect: enumerate every quantity
 your code computes and ask which has a DIRECT test rather than being exercised
 through something else.** Another session ran this on their own code and found
@@ -1416,13 +1566,19 @@ that the single quantity with no direct test held *three* bugs, while every othe
 quantity was exact. Regime enumeration would never have found them — the inputs
 were fine; the output was never checked.
 
-**And a third class neither instrument reaches: a function you have just fixed.**
-That session's first bug in that function was caught by comparing against a table
-published here — a causal, non-negative, single-lattice mask. The comparison was
-therefore structurally incapable of catching the other two, which needed negative
-offsets and two overlapping progressions. *Finding a defect in a function is the
-moment its remaining defects are least likely to be found, because the fix
-arrives with a passing check attached and the check is the one you already had.*
+**And a third class neither instrument reaches, with a runnable form:** *when you
+fix a bug, ask what the check that found it could not have seen, and test that.*
+
+The motivating case: that session's first bug was caught by comparing against a
+table published here — a causal, non-negative, single-lattice mask. The
+comparison was therefore structurally incapable of seeing negative offsets or two
+overlapping progressions, and **both remaining bugs were sitting in exactly those
+two gaps.** Stated as a question about the check rather than as a warning about
+trust, it is mechanical and takes about a minute.
+
+*Finding a defect in a function is the moment its remaining defects are least
+likely to be found, because the fix arrives with a passing check attached and the
+check is the one you already had.*
 
 Run here on this session's code, targeting the three quantities the audit
 identified as exposed — `transforms.tile_stats` (recently changed and never
@@ -1437,7 +1593,147 @@ believed.
 
 Summary of the three instruments, which find different things:
 *enumerating regimes finds untested inputs; enumerating quantities finds untested
-outputs; neither finds a function you just repaired and therefore trust.*
+outputs; and after a fix, asking what the finding check could not have seen finds
+the rest.*
+
+**A theory proposed and withdrawn, recorded because withdrawing it is the
+point.** On the evidence that the reviewing session's buggy quantity fed a ratio
+they rarely quoted while all three of mine feed numbers quoted constantly, this
+session proposed a refinement: *untested **and unquoted** quantities are the
+buggy ones.* Their audit refutes it — `billed_cols` and `max_le` fit that profile
+exactly (untested, unquoted, each called from a single site) and are clean across
+5000 random cases. The honest tally across both sessions is **three bugs in one
+of eight audited quantities**: enough to support *run the audit, it is cheap and
+sometimes finds three bugs at once*, and not enough to support any theory about
+which quantities, in either version. n=1 for the positive class.
+
+Four rules entered §7b today; three earned it by catching something. This one
+would have been the first admitted on a story, proposed by the session that has
+spent the day objecting when others did the same.
+
+**A finding about a shared CONVENTION must be propagated through every artefact
+before stopping.** The last four findings of the day — a kernel that could not
+reach ragged N, an engine ~1% wrong there, a selector that silently preferred
+class B there, and a harness plus two probes that excluded the regime upstream —
+all came from one question asked of one caveat: *this result depends on the
+zero-padding convention; which artefact depends on that convention?* Five
+artefacts, one question, and it paid every time.
+
+Conventions are exactly the thing assumed identically everywhere and verified
+nowhere, so they are where a single check has the highest fan-out. Asked in the
+morning it would have cost twenty minutes; asked at the end it cost a full round
+after both sessions had twice declared themselves finished.
+
+**Labels must be verified, not asserted.** The probe-annotation scheme
+(`PROBES`, naming what each mask exists to violate) is only as good as whether
+the mask actually violates it. Two probes in a reviewing session's suite were
+labelled *"non-power-of-two N"* and *"N not divisible by the fold depth"* and
+produced **zero** cells with either property — the N values chosen were all
+divisible by every tile size. `verify_probes()` now asserts, for each probe, that
+at least one cell genuinely exhibits the named property, and a test enforces it
+(11/11). That is strictly stronger than checking a probe ran: it catches one that
+ran plenty of cells, none of them relevant.
+
+**A SHAPE check restates the label and cannot fail; a BEHAVIOUR check can.**
+`m.off % 128 != 0` merely repeats "misaligned"; *does this mask break the max-law
+where its aligned twin obeys it* can come back false. Rewriting the verifiers
+behaviourally immediately failed three of eleven, and all three were real:
+
+- **`docpack-8m2` / `docpack-4m2`** — the signature was wrong, not the probe.
+  Short and long document packing both pick `shear`, so "argmin differs from the
+  long twin" is false. What short documents actually change is how badly the
+  identity fallback loses: **6.9× at N=1024 against 1.02× for the long twin**,
+  which is precisely what §5g measured. Signature corrected to that.
+- **`c2-splitter`** — the probe's property is **N-dependent**. The argmin splits
+  within a `max(BQ,A)` class at N=1024 and 1536 and *not* at 2048, which is §5i
+  arriving from a third direction. A single-N verifier called it broken; the
+  grid-wide one reports *where* it fires, which is the honest claim.
+
+**All eleven verifiers are now behavioural** — the last two shape checks were
+replaced with signatures supplied and measured by the reviewing session:
+`randD-600` fires iff *no residue fold beats identity* (0.90–0.99× against a
+structured control's 1.33–2.29×, so the check can fail), and
+`docpack-b0-3-5-900` fires iff the mask is *unlike both uniform twins* — it takes
+its argmin from the tiny-document twin (`shear`) and its identity-regret scale
+from the long one (1.03 against tiny's 64.0), a combination neither uniform case
+reaches. "Mixed" now names a behaviour rather than a shape.
+
+**A failure mode none of the day's other rules names: a probe that no longer
+checks the finding it was created for.** The `docpack` short-document probes were
+created to defend §5g's result — that the identity fallback loses 6.9× on short
+documents — and were verifying "the argmin differs from the long twin", which is
+false and unrelated. The probe ran, exhibited a property, and carried an accurate
+label; it had simply drifted from the result it existed to protect. Invisible to
+the run-count check, the shape/behaviour check, and the property assertion alike.
+The only thing that catches it is asking, of each probe, *which recorded finding
+would break silently if this probe were deleted?* — and that question has a
+mechanism, supplied by the reviewing session after this log first recorded the
+gap without one.
+
+**Assert the FINDING, not the property.** The gap exists because probes assert
+properties (*"this mask has short documents"*) while results are findings
+(*"short documents make the identity fallback lose 6.9×"*). A property can keep
+holding long after the probe has stopped defending its finding. Making the
+finding itself the assertion collapses the link into identity: the probe cannot
+drift from the finding because it *is* the finding, deleting the mask stops the
+finding's test at collection time, and a moved number names which recorded claim
+changed.
+
+`tests/test_findings.py` does this for the numbers a reader would act on —
+§3a-bis's 1.01–1.04× that killed mechanism 2, §3a's 2.00/2.00/2.00/1.12,
+§4's shear trap and the 136-vs-16 tie, §5a's RCM tie and regression, §5e's growing
+max-law violation, §5i's argmin flips, §5g's 6.909× vs 1.024×, §5d's symmetric-yet-
+non-compliant bidoc.
+
+**The distinction it exposes is the point: a suite that validates CORRECTNESS
+does not defend FINDINGS.** This repo had 564 tests, all of the first kind and
+none of the second, and the two are indistinguishable from a passing count. Every
+number in this log was reproducible only by re-running a script and reading the
+output — any of them could have silently changed and nothing would have failed.
+The reviewing session found the identical gap in their own artefact on being
+shown it.
+
+Two limitations, stated with the mechanism: it pins numbers, so a legitimate
+model improvement breaks the assertions — correct behaviour, but the failure
+message must say *a recorded claim changed* rather than *the code is broken*, or
+someone will just edit the constant. And it does nothing for findings that are
+arguments: the symmetry theorem's proof is not assertable, only its consequences
+are.
+
+A third exclusion variant, from a reviewing session applying this to their own
+probes: **a decline mechanism that filters out precisely the property being
+probed.** Their probe labelled *"N not divisible by the fold depth"* scored only
+cells where `N % s == 0`, because the cost function returns `None` on the others —
+the same guard that makes the regime interesting removes it from the sample.
+Anywhere a candidate declines on the condition a probe is testing, the probe is
+empty by construction. Distinct from an upstream exclusion in the grid and from a
+merely wrong label.
+
+**Propose a check, then run it against your own artefact first.** Three for
+three today, each time on the artefact of whoever had just proposed the check:
+this session proposed probe verification and shipped ten tautologies; the
+reviewing session proposed the shape/behaviour distinction and found two of their
+five probes mislabelled; this session proposed the skip counter and found its own
+grid excluded the regime one level upstream.
+
+That is selection, not coincidence — *you only propose a check when you have just
+understood a failure mode, and understanding it is exactly what makes your own
+code the most likely place to find it.* Stated as a prediction it is actionable;
+stated as an observation it is a curiosity.
+
+**The strongest procedural lesson of the day, and it is about instruments rather
+than independence.** Three sessions reviewed each other and the corrections went
+in both directions roughly evenly — but *not symmetrically in kind*. Most of one
+session's errors were caught by the others reasoning about its predicates; most
+of the other two's were caught by that session **constructing adversarial
+inputs**. Three sessions holding the same instrument would have produced neither
+set of catches.
+
+What made it work was less that the reviewers were independent and more that they
+ended up holding **different instruments** — and that was accident, not design.
+If this is reproduced, the thing to make deliberate is: **assign the instruments,
+not just the tasks.** One reviewer enumerating regimes, one auditing quantities,
+one reasoning about the derivations, agreed in advance.
 
 **It outranks the independence protocol**, on two instances from today: three
 independent implementations can converge on the same wrong restriction (§5f), and
@@ -1459,6 +1755,19 @@ fixes, in the order they were learned, and the third is the least intuitive:
    claiming *the max-law*, and the mask it built to test the claim would have
    confirmed a false version of it. Doing 2 without 3 is worse than not doing 2,
    because the counterexample lends authority.
+
+**A sixth class, distinct from all of the above: MEASUREMENT NARROWER THAN THE
+CLAIM.** §5j's headline moved from 97.9% / 1.0005 / 1.0562 to 85.1% / 1.2355 /
+10.6667 with no code change — the test set grew from 34 to 42 masks and the old
+figures had been measured on a set excluding the hardest regimes. The other five
+entries here are *defects*; this one is a scope error in the evaluation, and the
+fix differs: for a defect you repair the code, for this you widen the set and
+republish. The old number was never wrong about what it measured, only about what
+it was taken to mean.
+
+It has a nastier property than the defects: **it produces numbers that are
+correct, reproducible, and misleading**, so nothing about re-running them reveals
+the problem. Only comparing the test set against the claim does.
 
 A corollary from a separate incident: **a fast wrong check is worse than no
 check**, because it carries the authority of having been checked. A single dblp
@@ -1508,6 +1817,44 @@ Fixed with a finite sentinel (`-1e30`). The arithmetic is now pinned by
 numpy: one test asserts the fix matches a dense reference, one asserts `-inf`
 still NaNs so a revert is caught, one asserts a fully dead row returns zero. A
 GPU kernel bug should not need a scarce queue slot to rediscover.
+
+---
+
+## §7d — What review actually did, stated correctly
+
+A first draft of this summary said *essentially every substantive number got
+worse under review*. That is wrong, and the counterexamples are two of the more
+important results. The corrected form is narrower and predicts something rather
+than merely describing the day:
+
+> **Every number that was a MEASUREMENT got worse under review. Every claim that
+> was a STRUCTURAL ARGUMENT either died outright or got stronger.**
+
+| | went in | came out |
+|---|---|---|
+| **Measurements — all worse** | | |
+| mechanism 2 | 1.4–1.8× vs FlexAttention@128² | 1.01–1.04× vs a realistic baseline (§3a-bis) |
+| selector agreement / regret | 97.9% / 1.0005 / 1.0562 | 85.1% / 1.2355 / 10.6667 (§5j) |
+| the selection rule's input | grain | → max(BQ,A) → (BQ,A) → +N (§5b, §5c, §5e, §5i) |
+| **Structural arguments — one dead, two wider** | | |
+| the max-law | claimed for all diagonally-invariant masks | **false**; holds only under ALIGNED-AND-SEPARATED (§5e) |
+| the symmetry result | "an empirical law measured to 3 d.p." | a **theorem** by two involutions, then extended to non-square domains — divisibility, not squareness, was the load-bearing hypothesis (§5e, §7-tests) |
+| the scope of the selection claim | about to be narrowed to translation-invariant masks, excluding document packing and attention sinks | **restriction removed** — the AP-union primitive covers the whole zoo, verified here at 2016/2016 against this session's own oracle (§5f) |
+
+The mechanism behind the split: **a measurement is only as wide as its inputs**,
+so adversarial input degrades it reliably; **a structural argument either has a
+counterexample or does not**, so attacking one produces a kill or a
+strengthening, never a slow erosion.
+
+That is also a scheduling rule for review effort. Attacking measurements finds
+errors — five bugs and one scope error today. Attacking arguments is higher
+variance and higher value: today it produced one kill and two widenings, and the
+widenings put FlashMask's headline workload and StreamingLLM back inside the
+central claim after two of three sessions had independently written them out.
+
+**The causal half of the original sentence stands unchanged:** none of the
+numbers got worse because anyone was careless. They got worse because someone
+chose an input the original author would not have.
 
 ---
 

@@ -77,7 +77,8 @@ docs/figures/          generated
 notebooks/             the same log, executable, outputs stored
 tests/                 400 cases; the closed forms are checked against brute force
 results/               generated CSVs
-tools/                 notebook generation and execution
+tools/                 notebook generation, and the evaluation runners
+                       (run_selector_eval / _control / run_contested)
 ```
 
 ## Quickstart
