@@ -3,7 +3,7 @@
 #PBS -q debug
 #PBS -l select=1:system=polaris
 #PBS -l place=scatter
-#PBS -l walltime=00:50:00
+#PBS -l walltime=00:40:00
 #PBS -l filesystems=home:eagle
 #PBS -j oe
 #PBS -o logs/

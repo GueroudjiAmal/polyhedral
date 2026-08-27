@@ -8,4 +8,6 @@ select
 amort
 tiles
 classa
-traffic
+traffic-d8
+traffic-d4
+traffic-ls

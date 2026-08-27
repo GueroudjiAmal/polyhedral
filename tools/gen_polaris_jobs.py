@@ -28,17 +28,26 @@ JOBS = [
      "out-of-sample test of the fixed-cost account"),
     ("imbal",  "exp7_load_imbalance.py",         "", "debug",       "00:30:00",
      "counting vs makespan, with a wave-count control"),
-    ("select", "exp3_selection.py",              "", "debug",       "00:50:00",
+    ("select", "exp3_selection.py",              "", "debug",       "00:30:00",
      "does the wall-clock argmin match the element argmin"),
     ("amort",  "exp5_amortisation.py",           "", "debug",       "00:40:00",
      "permutation once-per-forward (PREFILL ONLY)"),
-    ("tiles",  "exp1_tile_shape.py",             "", "debug",       "00:50:00",
+    ("tiles",  "exp1_tile_shape.py",             "", "debug",       "00:40:00",
      "p(BQ,A,mask) -- read ACROSS masks, not down a column"),
     ("classa", "exp2_class_a.py",                "", "debug",       "00:30:00",
      "class A across tile shapes"),
-    # heavy: 3 masks x 5 tiles x 9 gather variants. Does not fit the debug hour.
-    ("traffic", "exp6_traffic_multiplier.py",    "", "preemptable", "01:30:00",
-     "LOWER BOUND on a class that is modelled, not implemented"),
+    # exp6 SPLIT BY MASK. All three masks is ~135 Triton compiles (GATHER_MULT x
+    # GATHER_SCATTER multiply the constexpr space 9x per tile shape) and wanted
+    # 90 min on preemptable -- a slot that may never land. One mask is ~45
+    # compiles, fits the debug hour, and the three are independent so a missing
+    # one costs a row rather than the experiment. Lowest priority: exp6 measures
+    # a proxy for class B, which has never been executed.
+    ("traffic-d8",  "exp6_traffic_multiplier.py", "dilated-8",     "debug", "00:35:00",
+     "traffic lower bound, dilated-8"),
+    ("traffic-d4",  "exp6_traffic_multiplier.py", "dilated-4",     "debug", "00:35:00",
+     "traffic lower bound, dilated-4"),
+    ("traffic-ls",  "exp6_traffic_multiplier.py", "local256+str8", "debug", "00:35:00",
+     "traffic lower bound, local256+str8"),
 ]
 
 TEMPLATE = """#!/bin/bash -l
@@ -173,6 +182,16 @@ echo "halt:     touch polaris/STOP   (current job finishes, successor not submit
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
+    # PRUNE first. The generator exists so ten job files cannot drift from one
+    # table -- but writing without deleting leaves a renamed job behind as a
+    # stale file, which is drift of exactly the kind it was meant to prevent.
+    # Caught when splitting `traffic` into three: the old traffic.pbs survived,
+    # still requesting 90 minutes on preemptable.
+    keep = {f"{j[0]}.pbs" for j in JOBS} | {"ORDER"}
+    for f in OUT.iterdir():
+        if f.name not in keep:
+            f.unlink()
+            print(f"  pruned stale {f.name}")
     for name, script, argv, queue, walltime, decides in JOBS:
         p = OUT / f"{name}.pbs"
         p.write_text(TEMPLATE.format(name=name, script=script, argv=argv,

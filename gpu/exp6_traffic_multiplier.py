@@ -43,6 +43,7 @@ from triton_attn import block_sparse_attention              # noqa: E402
 
 N, D, BH = 4096, 64, 8
 CASES = [("dilated-8", 8), ("dilated-4", 4), ("local256+str8", 8)]
+_ALL_CASES = list(CASES)
 TILES = [(128, 128), (128, 32), (64, 64), (32, 32), (16, 16)]
 #: exp6's gather touches exactly A rows, so on its own it isolates COALESCING at a
 #: constant row count. Class B touches A + a*(BQ-1) DISTINCT rows -- 1.94x to
@@ -137,4 +138,16 @@ def main():
 
 
 if __name__ == "__main__":
+    # `python exp6_traffic_multiplier.py dilated-8` runs one mask. exp6 is by far
+    # the heaviest experiment -- GATHER_MULT x GATHER_SCATTER multiply the Triton
+    # constexpr space 9x per tile shape, so all three masks is ~135 kernel
+    # compiles and does not fit a debug-queue hour. One mask is ~45 and does.
+    if len(sys.argv) > 1:
+        want = set(sys.argv[1:])
+        CASES = [c for c in CASES if c[0] in want]
+        if not CASES:
+            print(f"no such mask; choose from "
+                  f"{[c[0] for c in globals()['_ALL_CASES']]}")
+            raise SystemExit(1)
+        print(f"running only {sorted(want)}\n")
     raise SystemExit(main())
