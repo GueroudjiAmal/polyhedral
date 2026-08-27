@@ -156,17 +156,40 @@ def main():
     sys.modules["triton_attn"] = ta
 
     bad = []
-    for f in sorted(GPU.glob("exp*.py")):
-        sys.argv = [str(f)]
-        try:
-            runpy.run_path(str(f), run_name="__main__")
-            print(f"  OK        {f.name}")
-        except SystemExit as e:
-            print(f"  OK (exit {e.code})  {f.name}")
-        except Exception as e:
-            bad.append((f.name, f"{type(e).__name__}: {e}"))
-            print(f"  BROKEN    {f.name}   {type(e).__name__}: {e}")
-    print()
+    # TWO PASSES. The happy path is not enough: exp8 died on the GPU because
+    # every launch config raised, `except Exception: continue` swallowed all 12,
+    # and the missing config surfaced two frames later as int('None'). A stub
+    # kernel that always succeeds can never reach that. The second pass makes the
+    # kernel always raise, so the "nothing ran" path is exercised too -- an
+    # experiment must report WHY, not crash on its own bookkeeping.
+    for label, boom in (("happy path      ", False), ("kernel always fails", True)):
+        print(f"--- {label} ---")
+        ta.block_sparse_attention = (
+            (lambda *a, **kw: (_ for _ in ()).throw(
+                RuntimeError("stub: kernel refused to compile")))
+            if boom else (lambda q, *a, **kw: q))
+        for f in sorted(GPU.glob("exp*.py")):
+            sys.argv = [str(f)]
+            try:
+                runpy.run_path(str(f), run_name="__main__")
+                print(f"  OK        {f.name}")
+            except SystemExit as e:
+                print(f"  OK (exit {e.code})  {f.name}")
+            except Exception as e:
+                # In the failure pass, PROPAGATING the kernel's own error is
+                # correct -- the reason reaches the log. What is not correct is
+                # dying with a DIFFERENT error, which means the experiment lost
+                # the reason and reported its own bookkeeping instead. That is
+                # exactly what exp8 did: 12 swallowed compile errors surfaced as
+                # int('None') two frames away.
+                lost = boom and "stub: kernel refused to compile" not in str(e)
+                if lost or not boom:
+                    bad.append((f"{f.name} [{label.strip()}]",
+                                f"{type(e).__name__}: {e}"))
+                    print(f"  BROKEN    {f.name}   {type(e).__name__}: {e}")
+                else:
+                    print(f"  ok, reason preserved  {f.name}")
+        print()
     if bad:
         print(f"{len(bad)} experiment(s) would die on the GPU:")
         for n, e in bad:

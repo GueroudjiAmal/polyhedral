@@ -126,16 +126,27 @@ def main():
             # IndexError that syntax-checked clean and killed both exp8 jobs on
             # the GPU. Fields cannot be miscounted.
             best = Best(float("inf"), 0.0, None, None)
+            first_err = None
             for w, st in LAUNCH:
                 try:
                     ms, sd = bench.time_ms(lambda: block_sparse_attention(
                         qp, kp, vp, *idx, kind, p0, p1, p2, BQ, A,
                         perm_q=perm.int(), perm_kv=perm.int(),
                         num_warps=w, num_stages=st), warmup=25, reps=200)
-                except Exception:
+                except Exception as e:
+                    # KEEP THE FIRST REASON. `except: continue` swallowed all 12
+                    # configs and the failure surfaced two steps later as
+                    # int('None'), so a GPU job told us a launch config was
+                    # malformed instead of telling us the kernel would not run.
+                    if first_err is None:
+                        first_err = f"{type(e).__name__}: {str(e).splitlines()[0][:200]}"
                     continue
                 if ms < best.ms:
                     best = Best(ms, sd, w, st)
+            if best.warps is None:
+                print(f"    {tag:<10} NO LAUNCH CONFIG RAN. First failure of "
+                      f"{len(LAUNCH)}:\n      {first_err}")
+                return 1
             res[tag] = (tot, mx, runs, best.ms, best.sd, best.cfg)
             bw, bst = best.warps, best.stages
             if bw is not None:

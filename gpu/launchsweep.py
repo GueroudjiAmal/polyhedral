@@ -24,8 +24,10 @@ _HARD_FLOOR = {"warps": 1, "stages": 1}
 
 def _warn_if_on_boundary(cfg, label=""):
     """A winner at the edge of the sweep is a sweep that was too narrow."""
-    if cfg is None:
-        return ""
+    if not cfg or "None" in cfg:
+        # no config succeeded; the caller reports why. Do not turn a missing
+        # measurement into a parse error two frames away.
+        return "  <-- NO LAUNCH CONFIG SUCCEEDED"
     w, st = (int(x[1:]) for x in cfg.split("/"))
     ws = sorted({c[0] for c in LAUNCH})
     ss = sorted({c[1] for c in LAUNCH})

@@ -39,7 +39,7 @@ def _assert_kinds_match():
 
 
 @triton.jit
-def _live(d, q_abs, KIND: tl.constexpr, P0: tl.constexpr, P1: tl.constexpr,
+def _live(d, KIND: tl.constexpr, P0: tl.constexpr, P1: tl.constexpr,
           P2: tl.constexpr):
     """d = q_idx - kv_idx, elementwise. Mirrors gpu/masks_gpu.py exactly."""
     causal = d >= 0
@@ -53,10 +53,10 @@ def _live(d, q_abs, KIND: tl.constexpr, P0: tl.constexpr, P1: tl.constexpr,
         return causal & ((d < P0) | ((d % P1) == 0))
     if KIND == TWOBAND:
         return causal & ((d < P0) | ((d >= P1) & (d < P1 + P2)))
-    # SINKS: P0 = window width, P1 = number of attention sinks. The sink term is
-    # on ABSOLUTE kv, not on d -- this is the one supported mask that is not
-    # diagonally invariant, which is exactly why exp8 cell 1 needs it.
-    return causal & ((d < P0) | ((q_abs - d) < P1))
+    # SINKS: the window half only. The sink term is on ABSOLUTE kv, not on d, so
+    # it is applied at the call site where kv is in scope -- rather than changing
+    # this function's signature for every kind, which is what broke the run.
+    return causal & (d < P0)
 
 
 @triton.jit
