@@ -100,12 +100,34 @@ def _attn_fwd(Q, K, V, O, KVI, KVN, KVP, PQ, PK,
         # hoisting it costs essentially nothing.
         pk = tl.load(PK + offs_n)
 
-        # Only PARTIAL tiles pay for the BQ*A predicate evaluation -- the same
-        # three-way split FlexAttention's BlockMask makes, and the thing
-        # NOTES sec 3 measures. This branch must stay conditional.
-        if partial != 0:
-            d = pq[:, None] - pk[None, :]
-            qk = tl.where(_live(d, KIND, P0, P1, P2), qk, -float("inf"))
+        # BRANCH-FREE MASKING, and this is a deliberate concession.
+        #
+        # Ideally only PARTIAL tiles pay for the BQ*A predicate evaluation --
+        # that is FlexAttention's three-way BlockMask split, and PyTorch report
+        # 15-20% for masking every computed element. But Triton's software
+        # pipeliner cannot schedule ANY runtime `if` in the loop body ("operation
+        # scheduled before its operands"), and turning pipelining off to keep the
+        # branch would slow every tile, which is worse.
+        #
+        # So the predicate is evaluated on every visited tile and `partial` is
+        # folded into the where. WHAT THIS COSTS: our kernel forfeits the
+        # full-tile mask-skip that FlexAttention keeps, so it is CONSERVATIVE
+        # against that baseline -- the bias runs against our own claim, which is
+        # the safe direction. It does NOT bias our own configurations against
+        # each other (identity vs residue-perm, 128x128 vs 16x16) because every
+        # one pays the same overhead.
+        #
+        # WHAT IT DOES NOT CHANGE: which tiles are visited at all. Dead tiles are
+        # still skipped via kv_idx, so every element count in NOTES sec 3 still
+        # describes exactly the work this kernel does.
+        #
+        # FOLLOW-UP if a result lands close enough for 15-20% to matter: order
+        # kv_idx as [full tiles | partial tiles] and run two branch-free loops.
+        # That recovers the optimisation and still pipelines. Not done here
+        # because it touches blockindex and cannot be tested without a GPU.
+        d = pq[:, None] - pk[None, :]
+        qk = tl.where((partial == 0) | _live(d, KIND, P0, P1, P2),
+                      qk, -float("inf"))
 
         m_new = tl.maximum(m_i, tl.max(qk, 1))
         alpha = tl.exp(m_i - m_new)
