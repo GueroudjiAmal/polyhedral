@@ -1409,6 +1409,36 @@ testing; it also caught the two that no test set any of the three sessions wrote
 could have seen, because all three of us think of documents as long and of
 windows as wide.
 
+**A second instrument, for a different class of defect: enumerate every quantity
+your code computes and ask which has a DIRECT test rather than being exercised
+through something else.** Another session ran this on their own code and found
+that the single quantity with no direct test held *three* bugs, while every other
+quantity was exact. Regime enumeration would never have found them — the inputs
+were fine; the output was never checked.
+
+**And a third class neither instrument reaches: a function you have just fixed.**
+That session's first bug in that function was caught by comparing against a table
+published here — a causal, non-negative, single-lattice mask. The comparison was
+therefore structurally incapable of catching the other two, which needed negative
+offsets and two overlapping progressions. *Finding a defect in a function is the
+moment its remaining defects are least likely to be found, because the fix
+arrives with a passing check attached and the check is the one you already had.*
+
+Run here on this session's code, targeting the three quantities the audit
+identified as exposed — `transforms.tile_stats` (recently changed and never
+compared to an independent reference), `cost.dense_cost` (the oracle `cost.cost`
+is validated against, itself never validated), and `blockindex.build` (feeds
+every GPU prediction; counts checked only against `polyattn.cost`, i.e. another
+implementation of the same idea, inside a GPU-gated test that has never run). All
+three came back exact — 540/540, 24/24, 80/80 against a naive triple loop, plus
+coverage and full/partial-flag assertions on the index. The value is not the
+result; it is that they are now pinned by `tests/test_quantities.py` instead of
+believed.
+
+Summary of the three instruments, which find different things:
+*enumerating regimes finds untested inputs; enumerating quantities finds untested
+outputs; neither finds a function you just repaired and therefore trust.*
+
 **It outranks the independence protocol**, on two instances from today: three
 independent implementations can converge on the same wrong restriction (§5f), and
 no independently-written test set catches a regime all three authors share an

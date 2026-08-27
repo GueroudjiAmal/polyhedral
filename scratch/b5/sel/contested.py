@@ -10,7 +10,28 @@ from blocks import Iv, Ap
 from spec import DiagSpec
 from xform import CANDIDATES, select
 from oracle import oracle_cost
-from evaluate import build_suite, TILES
+import importlib.util as _iu
+_sp = _iu.spec_from_file_location("_ev",
+    "/home/agueroudji/Work/Polyhedral_sparce/scratch/b5/sel/evaluate.py")
+# evaluate.py runs its report at import time; re-implement the suite instead.
+TILES = [128, 64, 32, 16]
+import random as _r
+_rng = _r.Random(20260826)
+
+
+def build_suite(N):
+    S = [("causal", [Iv(0, N)]), ("window-128", [Iv(0, 128)]),
+         ("window-256", [Iv(0, 256)]), ("dilated-2", [Ap(0, 2, N // 2)]),
+         ("dilated-4", [Ap(0, 4, N // 4)]), ("dilated-8", [Ap(0, 8, N // 8)]),
+         ("local256+str8", [Iv(0, 256), Ap(0, 8, N // 8)]),
+         ("twoband-aligned", [Iv(0, 128), Iv(1024, 1152)]),
+         ("twoband-misaligned", [Iv(0, 128), Iv(1000, 1128)]),
+         ("c2-splitter", [Iv(0, 24), Iv(500, 524), Ap(0, 2, N // 2)]),
+         ("band-mis-300", [Iv(0, 128), Iv(300, 428)]),
+         ("band-mis-77", [Iv(0, 64), Iv(77, 205)]),
+         ("randD-300", [Iv(o, o + 1) for o in
+                        sorted(_rng.sample(range(N), min(300, N)))])]
+    return [(n, [p for p in ps if not p.clip(N).empty()]) for n, ps in S]
 
 MARGINS = (0.0, 0.01, 0.05, 0.20)
 print("\n=== agreement on CONTESTED cells (oracle best vs 2nd-best gap > margin) ===")

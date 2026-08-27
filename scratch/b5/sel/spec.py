@@ -89,34 +89,6 @@ class DiagSpec:
                 best = c if best is None else max(best, c)
         return best
 
-    def residue_runs(self, s):
-        """{rho: [Ap(start, s, count)]} -- D split by residue class mod s.
-        Each Iv contributes one run per residue; each Ap contributes runs only
-        for the residues its own stride reaches."""
-        out = {}
-        for p in self.pieces:
-            if isinstance(p, Iv):
-                if p.empty():
-                    continue
-                for rho in range(s):
-                    first = p.lo + ((rho - p.lo) % s)
-                    if first < p.hi:
-                        cnt = (p.hi - 1 - first) // s + 1
-                        out.setdefault(rho, []).append(Ap(first, s, cnt))
-            else:
-                if p.count <= 0:
-                    continue
-                step = p.stride
-                d = gcd(step, s)
-                # terms cycle through residues rho = (start + m*step) mod s with period s/d
-                per = s // d
-                for m in range(min(per, p.count)):
-                    rho = (p.start + m * step) % s
-                    cnt = (p.count - 1 - m) // per + 1
-                    out.setdefault(rho, []).append(
-                        Ap(p.start + m * step, per * step, cnt))
-        return out
-
     # --- cost -------------------------------------------------------------
     def cost(self, N, BQ, A):
         g = gcd(BQ, A)
@@ -134,36 +106,30 @@ class DiagSpec:
         return BQ * A * tot
 
     def live(self, N):
-        """Number of live (q,kv) pairs. Sums N-d over the UNION of offsets.
+        """Number of live (q,kv) pairs on [0,N)^2: sum of N-|d| over the UNION
+        of offsets, clipped to (-N, N).
 
-        The first version summed each piece independently, which double-counts
-        wherever pieces overlap -- e.g. local256+str8, whose band [0,256) and
-        stride-8 lattice share the offsets 0,8,...,248. That inflated `live` by
-        8.9% and hence deflated every waste RATIO by 0.919. Costs were never
-        affected (they are validated against the oracle); only this denominator.
+        Three bugs lived here, each invisible to the test before it:
+          v1 summed pieces independently -> double-counted Iv/Ap overlap (8.9%
+             on local256+str8). Found by cross-checking a published waste table.
+          v2 deduped Ap elements only against merged INTERVALS, not against other
+             Aps -> Ap(0,5,50) with Ap(0,7,50) double-counted their multiples of 35.
+          v2 also clipped every piece to [0,N), silently DISCARDING negative
+             offsets, so any non-causal mask lost half its elements.
+        Both v2 bugs were found only by testing live() DIRECTLY against brute
+        force. No regime probe would have found them: the quantity had no test.
+
+        Offsets are enumerated (at most 2N of them), which is O(N) and off the
+        hot path -- select() ranks costs and never calls this.
         """
-        ivs = []
+        offs = set()
         for p in self.pieces:
-            q = p.clip(N)
-            if isinstance(q, Iv) and not q.empty():
-                ivs.append((q.lo, q.hi))
-        ivs.sort()
-        merged = []
-        for a, b in ivs:
-            if merged and a <= merged[-1][1]:
-                merged[-1][1] = max(merged[-1][1], b)
-            else:
-                merged.append([a, b])
-        tot = 0
-        for a, b in merged:
-            for d in range(a, b):
-                tot += N - d
-        for p in self.pieces:
-            q = p.clip(N)
-            if isinstance(q, Iv):
-                continue
-            for m in range(q.count):
-                d = q.start + m * q.stride
-                if not any(a <= d < b for a, b in merged):
-                    tot += N - d
-        return tot
+            if isinstance(p, Iv):
+                lo, hi = max(-(N - 1), p.lo), min(N, p.hi)
+                offs.update(range(lo, hi))
+            elif p.count > 0:
+                for m in range(p.count):
+                    d = p.start + m * p.stride
+                    if -(N - 1) <= d < N:
+                        offs.add(d)
+        return sum(N - abs(d) for d in offs)

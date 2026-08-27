@@ -49,6 +49,11 @@ fi
 source .venv-polaris/bin/activate
 set -u
 
+# Documented Polaris known issue: software that creates socket files under
+# TMPDIR hits "AF_UNIX path too long", and ALCF names pytorch specifically.
+# The documented fix, verbatim from the known-issues page.
+export TMPDIR=/tmp
+
 export CUDA_VISIBLE_DEVICES=0          # 1 of the node's 4 A100s; nothing here scales out
 export TRITON_CACHE_DIR="$PWD/.triton-cache-$PBS_JOBID"
 

@@ -25,53 +25,87 @@ case "$REPO" in
 esac
 
 # --- module stack -------------------------------------------------------
-# `module load conda` can fail when the login shell already has a PrgEnv/compiler
-# combination that the conda modulefile cannot swap to -- it reports the missing
-# dependency (e.g. gcc-native, cray-hdf5-parallel) rather than the real cause,
-# which is a dirty or stale module environment. So: reset first, ignore the
-# cache, and fall back across the plausible module names rather than assuming.
-module use /soft/modulefiles 2>/dev/null || true
+# EXACTLY the sequence in the ALCF docs (Polaris > Data Science > Python and
+# > PyTorch). Nothing invented:
+#     module use /soft/modulefiles
+#     module load conda
+#     conda activate base
+#
+# Two things were previously here and are gone on purpose:
+#   * `module reset` -- not in the docs, and on a Cray PE it can drop the very
+#     modules (cray-mpich, cray-hdf5) the conda build links against.
+#   * a `frameworks` fallback -- that is the Aurora module name. Polaris uses
+#     `conda`. Trying it here only produced a misleading second failure.
+module use /soft/modulefiles
 
-echo "== resetting module environment"
-module reset            2>/dev/null || module purge 2>/dev/null || true
-module use /soft/modulefiles 2>/dev/null || true
+if ! module load conda 2>/tmp/.modload.$$; then
+  cat /tmp/.modload.$$ >&2
+  cat >&2 <<'HINT'
 
-load_python_stack() {
-  for m in "$@"; do
-    echo "-- trying: module load $m"
-    if module --ignore_cache load "$m" 2>/dev/null && command -v python >/dev/null; then
-      echo "   loaded $m"; LOADED_MODULE="$m"; return 0
-    fi
-    module unload "$m" 2>/dev/null || true
-  done
-  return 1
-}
+FATAL: `module load conda` failed.
 
-# `frameworks` is the newer ALCF name for the ML stack; `conda` the older one.
-if ! load_python_stack frameworks conda; then
-  echo
-  echo "FATAL: could not load a Python/ML module. What is actually available:"
-  module --ignore_cache avail frameworks conda 2>&1 | sed 's/^/    /'
-  echo
-  echo "Then re-run with the working name, e.g.:"
-  echo "    module use /soft/modulefiles && module load <name>/<version>"
-  echo "If a dependency is reported missing, check it exists:  module spider gcc-native"
+If it reported a dependency as UNKNOWN (cray-hdf5-parallel, gcc-native, ...)
+that dependency almost certainly EXISTS -- Lmod is reading a stale user cache
+written before a site software update. Lmod says so itself in the error text.
+Clear it and start a fresh shell:
+
+    rm -rf ~/.lmod.d/.cache ~/.cache/lmod
+    module --ignore_cache spider conda        # confirm which versions are real
+    module use /soft/modulefiles && module load conda
+
+If you have a saved module collection it can pin retired modules too:
+
+    module savelist        # if a "default" exists and you did not want it:
+    module disable default
+
+Only if a specific conda version is genuinely broken site-side, pick another:
+
+    module --ignore_cache avail conda
+
+HINT
+  rm -f /tmp/.modload.$$
   exit 1
 fi
+rm -f /tmp/.modload.$$
 
-set +u                                  # conda activate trips `set -u`
-conda activate base 2>/dev/null || echo "   (no conda base to activate; continuing)"
+set +u                       # conda's activate scripts trip `set -u`
+conda activate base
 set -u
 python -c 'import sys; print("   python", sys.version.split()[0], sys.executable)'
+LOADED_MODULE=conda
 
-# --system-site-packages inherits the module's torch build, which is matched to
-# the driver. Installing our own torch is the usual way to get a CUDA mismatch.
-if [ ! -d .venv-polaris ]; then
-  python -m venv --system-site-packages .venv-polaris
+# TWO WAYS TO GET TORCH. Default is the module's build; --pip-torch is the
+# escape hatch when the module's build is unusable.
+#
+#   inherit (default)  --system-site-packages, uses the conda module's torch.
+#                      Matched to the driver, no download. But on Polaris that
+#                      torch is an HPC build linked against Cray MPICH, and it
+#                      fails with e.g. "libmpi_gnu_123.so.12: cannot open shared
+#                      object file" whenever the PrgEnv it was built against has
+#                      been retired -- which is a site upgrade away at any time.
+#
+#   --pip-torch        clean venv, torch from PyPI. NO Cray MPI dependency at
+#                      all, which is the right trade here: every experiment is
+#                      single-GPU (select=1, CUDA_VISIBLE_DEVICES=0) and nothing
+#                      in gpu/ calls MPI. Costs a ~2.5GB download through the
+#                      ALCF proxy; must match the compute-node driver.
+PIP_TORCH=0
+for a in "$@"; do [ "$a" = "--pip-torch" ] && PIP_TORCH=1; done
+
+if [ "$PIP_TORCH" = "1" ]; then
+  echo "== building a CLEAN venv with torch from PyPI (no Cray MPI)"
+  [ -d .venv-polaris ] || python -m venv .venv-polaris
+  source .venv-polaris/bin/activate
+  python -m pip install --upgrade pip
+  python -m pip install torch --index-url https://download.pytorch.org/whl/cu124
+else
+  echo "== building a venv that INHERITS the module's torch"
+  echo "   (re-run with --pip-torch if 'import torch' fails on a Cray library)"
+  [ -d .venv-polaris ] || python -m venv --system-site-packages .venv-polaris
+  source .venv-polaris/bin/activate
+  python -m pip install --upgrade pip
 fi
-source .venv-polaris/bin/activate
 
-python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 
 python - <<'PY'
@@ -110,11 +144,18 @@ except Exception as e:
     if "libcuda" in msg:
         print("     -> driver library only. Expected on a login node; verify in a job.")
     else:
-        print("     -> NOT a driver issue. Likely the module environment is missing a")
-        print("        runtime dependency this torch build needs. Check:")
-        print("          module list")
-        print("          echo $LD_LIBRARY_PATH | tr : '\n' | grep -iE 'cuda|nvidia|nvhpc'")
-        print("        and try loading conda WITHOUT the `module reset` above.")
+        print("     -> NOT a driver issue.")
+        if "libmpi" in msg or "cray" in msg.lower():
+            print("        This is CRAY MPI, not CUDA. The conda module's torch is an HPC")
+            print("        build linked against cray-mpich for a specific GCC (the number")
+            print("        in libmpi_gnu_NNN encodes it). When the site retires that")
+            print("        PrgEnv, this torch can no longer load and no module fixes it.")
+            print("        Nothing in gpu/ uses MPI -- every run is single-GPU -- so the")
+            print("        right answer is to stop inheriting it:")
+            print("            rm -rf .venv-polaris && bash polaris/setup.sh --pip-torch")
+        else:
+            print("        Check:  module list")
+            print("                echo $LD_LIBRARY_PATH | tr : '\\n' | grep -iE 'cuda|nvidia'")
 PYCHK
 
 echo
