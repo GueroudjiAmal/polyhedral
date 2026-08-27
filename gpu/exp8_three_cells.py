@@ -63,7 +63,15 @@ D, BH = 64, 8
 #: on the boundary means the optimum may lie outside what was offered, and both
 #: headline numbers -- the 1.61x small-tile penalty and the 3.19x transform gain --
 #: came from those rows. num_warps=1 is legal and was never tried.
-LAUNCH = ((1, 2), (1, 3), (2, 2), (2, 3), (2, 4), (4, 2), (4, 3), (8, 2), (8, 3))
+LAUNCH = ((1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (2, 4),
+          (4, 1), (4, 2), (4, 3), (8, 2), (8, 3))
+
+#: num_warps cannot go below 1, so a winner at w1 is a HARDWARE FLOOR, not a
+#: sweep that was too narrow. num_stages CAN go to 1, so s2 as the minimum was a
+#: genuine gap -- run 2 reported "ON SWEEP BOUNDARY (warps)" for both 16x16 rows,
+#: which was a false alarm, while the real gap (stages) went unflagged on the
+#: 128x128 row. The detector below distinguishes them.
+_HARD_FLOOR = {"warps": 1, "stages": 1}
 
 CELLS = [
     ("1  sinks4+win256", "sinks4+win256", 1024, 128, 128, (None, 8),

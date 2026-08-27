@@ -23,6 +23,20 @@ FLEX_BLOCKS = [128, 64, 32]
 OURS = [(128, 128), (128, 32), (16, 16)]
 
 
+def _why(e, n=3):
+    """Root cause, not just the wrapper class. BackendCompilerFailed on its own
+    says nothing -- two runs reported it and neither told us why."""
+    cur, out = e, []
+    for _ in range(6):
+        first = (str(cur).strip().splitlines() or [""])[0]
+        out.append(f"{type(cur).__name__}: {first[:90]}" if first else type(cur).__name__)
+        nxt = getattr(cur, "inner_exception", None) or cur.__cause__ or cur.__context__
+        if nxt is None or nxt is cur:
+            break
+        cur = nxt
+    return " <- ".join(out[:n])
+
+
 def main():
     try:
         from torch.nn.attention.flex_attention import create_block_mask, flex_attention
@@ -46,10 +60,16 @@ def main():
             try:
                 bm = create_block_mask(mod, B=None, H=None, Q_LEN=N, KV_LEN=N,
                                        BLOCK_SIZE=bs, _compile=True)
-                ms = bench.time_ms(lambda: fa(q4, k4, v4, block_mask=bm), reps=50)[0]
+                # Tell the kernel to use tiles matching the mask. Without this a
+                # sub-128 BlockMask is inconsistent with the template's default
+                # tile and the lowering fails -- which is what produced the bare
+                # `BackendCompilerFailed` in the first two runs.
+                kopt = {} if bs >= 128 else {"kernel_options": {"BLOCK_M": bs,
+                                                                "BLOCK_N": bs}}
+                ms = bench.time_ms(lambda: fa(q4, k4, v4, block_mask=bm, **kopt), reps=50)[0]
                 rows.append([f"flex {bs}x{bs}", float("nan"), ms])
             except Exception as e:
-                rows.append([f"flex {bs}x{bs}", float("nan"), f"FAIL {type(e).__name__}"])
+                rows.append([f"flex {bs}x{bs}", float("nan"), f"FAIL {_why(e)}"])
         for BQ, A in OURS:
             bi = blockindex.build(m, N, BQ, A)
             idx = blockindex.to_cuda(bi)

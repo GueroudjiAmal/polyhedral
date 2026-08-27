@@ -1,0 +1,77 @@
+host x3108c0s31b0n0   2026-08-27T14:33:36+00:00
+name, memory.total [MiB], compute_cap
+NVIDIA A100-SXM4-40GB, 40960 MiB, 8.0
+NVIDIA A100-SXM4-40GB, 40960 MiB, 8.0
+NVIDIA A100-SXM4-40GB, 40960 MiB, 8.0
+NVIDIA A100-SXM4-40GB, 40960 MiB, 8.0
+
+############ env ############
+=== python / packages ===
+  python 3.11.8
+  torch      present
+  triton     present
+  polyattn   present
+
+=== device ===
+  NVIDIA A100-SXM4-40GB  sm_80  39.5 GiB  108 SMs
+  torch 2.6.0+cu124, cuda 12.4
+  triton 3.2.0
+
+=== relevant to specific claims ===
+  sm_80: Ampere/Ada -- mma m16n8k16
+  NOTES sec 7a treats the 16-wide tile floor as a stand-in, not a constant.
+  This box's real floor is whatever exp1 measures, not what the ISA says.
+  flex_attention: available (baseline for exp4)
+
+OK
+
+############ correctness ####
+=== 1. mask definitions agree across consumers ===
+  causal           OK
+  window-128       OK
+  window-512       OK
+  dilated-4        OK
+  dilated-8        OK
+  local256+str8    OK
+  twoband-1024     OK
+  twoband-1000     OK
+
+=== 2. BlockIndex element count == polyattn.cost prediction ===
+  causal           OK across 7 tile shapes
+  window-128       OK across 7 tile shapes
+  dilated-8        OK across 7 tile shapes
+  local256+str8    OK across 7 tile shapes
+  twoband-1000     OK across 7 tile shapes
+
+=== 3. Triton kernel vs dense reference ===
+  causal           max abs err 1.95e-03  OK
+  window-128       max abs err 1.95e-03  OK
+  dilated-8        max abs err 9.77e-04  OK
+  local256+str8    max abs err 1.95e-03  OK
+  twoband-1000     max abs err 1.95e-03  OK
+
+=== 4. class A permuted path vs the same reference ===
+  dilated-4        waste 1.058  max abs err 1.95e-03  OK
+  dilated-8        waste 1.116  max abs err 9.77e-04  OK
+
+ALL OK
+
+############ GO/NO-GO #######
+permuted-path correctness: max abs err 1.95e-03  OK
+
+GO/NO-GO   dilated-8 + residue-perm-8   N=4096 B=1 H=8 D=64
+-------------------------------------------------------------------------------------------------------
+                                      implementation    waste         ms   launch  PREDICTED   MEASURED
+ours 128x128 identity  <-- ON SWEEP BOUNDARY (stages)    8.234      0.358    w4/s2      1.000      1.000
+  ours 16x16 identity  <-- ON SWEEP BOUNDARY (warps)    8.016      0.543    w1/s3      1.027      0.660
+ours 16x16 residue-perm-8  <-- ON SWEEP BOUNDARY (warps)    1.029      0.139    w1/s3      8.000      2.574
+                    FlexAttention 128x128  (default)      nan      0.317        -        nan      1.129
+                                 FlexAttention 64x64      nanFAIL BackendCompilerFailed        -        nan        nan
+                                 FlexAttention 32x32      nanFAIL BackendCompilerFailed        -        nan        nan
+
+one-time permutation of Q/K/V: 0.106 ms, NOT included above
+PREDICTED and MEASURED are both speedups over the 128x128 unpermuted baseline, printed adjacent on purpose:
+  they agree      -> the cost model predicts hardware
+  measured >> 1 but predicted ~ 1 -> the win is not the transform
+  predicted >> measured -> the model overprices what it counts
+ms is the best over a launch-config sweep, so a slow small tile is the hardware and not our configuration.

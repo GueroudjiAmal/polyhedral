@@ -1,0 +1,35 @@
+#!/bin/bash -l
+#PBS -N polyattn-flexdiag
+#PBS -q debug
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=00:20:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+#PBS -o logs/
+
+# Answers one question: why does FlexAttention fail below BLOCK_SIZE 128, and
+# does matching kernel_options fix it. Cheap, and it decides whether every
+# speedup this project quotes is against a tuned or an untuned baseline.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+mkdir -p logs results
+
+if [ -f polaris/env.generated.sh ]; then . polaris/env.generated.sh; else
+  echo "FATAL: run polaris/setup.sh on a login node first." >&2; exit 1; fi
+module use /soft/modulefiles
+set +u
+module --ignore_cache load "${POLYATTN_MODULE:-conda}" 2>/dev/null || \
+  echo "WARN: module load failed, continuing -- the venv is what matters." >&2
+conda activate base 2>/dev/null || true
+source "$POLYATTN_VENV/bin/activate"
+set -u
+
+export CUDA_VISIBLE_DEVICES=0
+export TRITON_CACHE_DIR="$PWD/.triton-cache-$PBS_JOBID"
+export TORCHINDUCTOR_CACHE_DIR="$PWD/.inductor-cache-$PBS_JOBID"
+
+STAMP="$(date +%Y%m%d-%H%M%S)-${PBS_JOBID%%.*}"
+python gpu/diag_flexattention.py 2>&1 | tee "results/flexdiag-$STAMP.txt"
+echo "wrote results/flexdiag-$STAMP.txt"

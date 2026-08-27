@@ -40,7 +40,15 @@ OUR_TILES = ((128, 128), (16, 16))
 #: on the boundary means the optimum may lie outside what was offered, and both
 #: headline numbers -- the 1.61x small-tile penalty and the 3.19x transform gain --
 #: came from those rows. num_warps=1 is legal and was never tried.
-LAUNCH = ((1, 2), (1, 3), (2, 2), (2, 3), (2, 4), (4, 2), (4, 3), (8, 2), (8, 3))
+LAUNCH = ((1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (2, 4),
+          (4, 1), (4, 2), (4, 3), (8, 2), (8, 3))
+
+#: num_warps cannot go below 1, so a winner at w1 is a HARDWARE FLOOR, not a
+#: sweep that was too narrow. num_stages CAN go to 1, so s2 as the minimum was a
+#: genuine gap -- run 2 reported "ON SWEEP BOUNDARY (warps)" for both 16x16 rows,
+#: which was a false alarm, while the real gap (stages) went unflagged on the
+#: 128x128 row. The detector below distinguishes them.
+_HARD_FLOOR = {"warps": 1, "stages": 1}
 
 
 class _Dense:
@@ -61,23 +69,48 @@ def _warn_if_on_boundary(cfg, label=""):
     w, st = (int(x[1:]) for x in cfg.split("/"))
     ws = sorted({c[0] for c in LAUNCH})
     ss = sorted({c[1] for c in LAUNCH})
-    edge = [n for n, v, lo, hi in (("warps", w, ws[0], ws[-1]),
-                                   ("stages", st, ss[0], ss[-1]))
-            if v == lo or v == hi]
-    return f"  <-- ON SWEEP BOUNDARY ({', '.join(edge)}){label}" if edge else ""
+    edge = []
+    for n, v, lo, hi in (("warps", w, ws[0], ws[-1]), ("stages", st, ss[0], ss[-1])):
+        if v == hi:
+            edge.append(f"{n} at sweep max")
+        elif v == lo and lo > _HARD_FLOOR[n]:
+            edge.append(f"{n} at sweep min, floor is {_HARD_FLOOR[n]}")
+        # v == lo == hard floor: the hardware limit, not a narrow sweep
+    return f"  <-- SWEEP TOO NARROW ({'; '.join(edge)}){label}" if edge else ""
 
 
-def best_launch(fn_of):
-    """Min over a small launch-config sweep. Returns (ms, num_warps, num_stages)."""
-    best = (float("inf"), None, None)
-    for w, st in LAUNCH:
+#: The sweep used in run 1, kept so the widening can be measured WITHIN a job.
+#: Comparing run 1's numbers against run 2's cannot separate tuning from noise:
+#: rp8 went 0.122 -> 0.139 between jobs even though w2/s2 was in both sweeps, so
+#: that 14% is node/job variance and the apparent effect of widening is inside it.
+NARROW = ((4, 2), (8, 2), (4, 3), (8, 3), (2, 2))
+
+
+def best_launch(fn_of, configs=LAUNCH):
+    """Min over a launch-config sweep. Returns (ms, stdev, num_warps, num_stages)."""
+    best = (float("inf"), 0.0, None, None)
+    for w, st in configs:
         try:
-            t = bench.time_ms(lambda: fn_of(w, st), warmup=10, reps=40)[0]
+            t, sd = bench.time_ms(lambda: fn_of(w, st), warmup=10, reps=60)
         except Exception:
             continue                       # config exceeds resources for this tile
         if t < best[0]:
-            best = (t, w, st)
+            best = (t, sd, w, st)
     return best
+
+
+def _why(e, n=3):
+    """Root cause, not just the wrapper class. BackendCompilerFailed on its own
+    says nothing -- two runs reported it and neither told us why."""
+    cur, out = e, []
+    for _ in range(6):
+        first = (str(cur).strip().splitlines() or [""])[0]
+        out.append(f"{type(cur).__name__}: {first[:90]}" if first else type(cur).__name__)
+        nxt = getattr(cur, "inner_exception", None) or cur.__cause__ or cur.__context__
+        if nxt is None or nxt is cur:
+            break
+        cur = nxt
+    return " <- ".join(out[:n])
 
 
 def main():
@@ -112,20 +145,26 @@ def main():
     for BQ, A in OUR_TILES:
         bi = blockindex.build(_Dense(M), N, BQ, A)
         idx = blockindex.to_cuda(bi)
-        t, w, st = best_launch(lambda w, st: block_sparse_attention(
-            q3, k3, v3, *idx, kind, p0, p1, p2, BQ, A, num_warps=w, num_stages=st))
+        fn = lambda w, st: block_sparse_attention(
+            q3, k3, v3, *idx, kind, p0, p1, p2, BQ, A, num_warps=w, num_stages=st)
+        t, sd, w, st = best_launch(fn)
+        t_nar = best_launch(fn, NARROW)[0]
         if base_ms is None:
             base_ms, base_el = t, bi.elements
         cfg = f"w{w}/s{st}"
         rows.append([f"ours {BQ}x{A} identity" + _warn_if_on_boundary(cfg),
-                     bi.waste, t, cfg, base_el / bi.elements, base_ms / t])
-    t_perm, wp, stp = best_launch(lambda w, st: block_sparse_attention(
+                     bi.waste, f"{t:.4f} cv{sd/t*100:.0f}% (narrow {t_nar:.4f})",
+                     cfg, base_el / bi.elements, base_ms / t])
+    fnp = lambda w, st: block_sparse_attention(
         qp, kp, vp, *idx_p, kind, p0, p1, p2, 16, 16,
-        perm_q=perm.int(), perm_kv=perm.int(), num_warps=w, num_stages=st))
+        perm_q=perm.int(), perm_kv=perm.int(), num_warps=w, num_stages=st)
+    t_perm, sdp, wp, stp = best_launch(fnp)
+    t_perm_nar = best_launch(fnp, NARROW)[0]
     cfgp = f"w{wp}/s{stp}"
     rows.append(["ours 16x16 residue-perm-8" + _warn_if_on_boundary(cfgp),
-                 bi_p.waste, t_perm, cfgp, base_el / bi_p.elements,
-                 base_ms / t_perm])
+                 bi_p.waste,
+                 f"{t_perm:.4f} cv{sdp/t_perm*100:.0f}% (narrow {t_perm_nar:.4f})",
+                 cfgp, base_el / bi_p.elements, base_ms / t_perm])
 
     try:
         from torch.nn.attention.flex_attention import create_block_mask, flex_attention
@@ -135,19 +174,26 @@ def main():
             try:
                 bm = create_block_mask(mod, B=None, H=None, Q_LEN=N, KV_LEN=N,
                                        BLOCK_SIZE=bs, _compile=True)
-                t = bench.time_ms(lambda: fa(q4, k4, v4, block_mask=bm), reps=50)[0]
+                # Tell the kernel to use tiles matching the mask. Without this a
+                # sub-128 BlockMask is inconsistent with the template's default
+                # tile and the lowering fails -- which is what produced the bare
+                # `BackendCompilerFailed` in the first two runs.
+                kopt = {} if bs >= 128 else {"kernel_options": {"BLOCK_M": bs,
+                                                                "BLOCK_N": bs}}
+                t = bench.time_ms(lambda: fa(q4, k4, v4, block_mask=bm, **kopt), reps=50)[0]
                 rows.append([f"FlexAttention {bs}x{bs}"
                              + ("  (default)" if bs == 128 else ""), float("nan"),
                              t, "-", float("nan"), base_ms / t])
             except Exception as e:
                 rows.append([f"FlexAttention {bs}x{bs}", float("nan"),
-                             f"FAIL {type(e).__name__}", "-", float("nan"),
+                             f"FAIL {_why(e)}", "-", float("nan"),
                              float("nan")])
     except Exception as e:
         print(f"flex_attention unavailable: {e}")
 
     pc = permute.permutation_cost_ms(q3, k3, v3, perm)
-    bench.report(rows, [("implementation", 52), ("waste", 9), ("ms", 11),
+    bench.report(rows, [("implementation", 52), ("waste", 9),
+                        ("ms  cv  (narrow sweep)", 30),
                         ("launch", 9), ("PREDICTED", 11), ("MEASURED", 11)],
                  title=f"GO/NO-GO   {NAME} + residue-perm-{STRIDE}   "
                        f"N={N} B={B} H={H} D={D}",
