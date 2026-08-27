@@ -56,3 +56,28 @@ if ! python -c 'import torch' >/dev/null 2>&1; then
   unset _err _lib _dir
 fi
 unset -f _polyattn_torch_err
+
+# --- Triton's host compiler ---------------------------------------------
+# Triton JIT-compiles a small C helper (backends/nvidia/driver.c) at first use
+# and picks the compiler from $CC. On Polaris the Cray/NVHPC programming
+# environment sets CC=nvc, but Triton passes GCC-specific flags, so nvc dies:
+#     nvc-Error-Unknown switch: -Wno-psabi
+# It is not a CUDA problem and not a Triton bug -- just the wrong host compiler.
+# Point CC at a real gcc. Triton only needs it to build that one shim.
+case "$(basename "${CC:-}" 2>/dev/null)" in
+  nvc|nvc++|cc|CC|craycc)  _polyattn_badcc=1 ;;
+  "")                      _polyattn_badcc=1 ;;   # unset: Triton may still find nvc
+  *)                       _polyattn_badcc=0 ;;
+esac
+if [ "${_polyattn_badcc:-0}" = "1" ]; then
+  _polyattn_oldcc="${CC:-unset}"
+  for _g in /usr/bin/gcc "$(command -v gcc 2>/dev/null)" /usr/bin/cc; do
+    if [ -x "${_g:-}" ] && "$_g" --version 2>/dev/null | head -1 | grep -qi gcc; then
+      export CC="$_g"
+      export CXX="${_g}++"; [ -x "$CXX" ] || export CXX="$(command -v g++ 2>/dev/null || echo "$_g")"
+      echo "  env_fixup: CC=$CC  (was '$_polyattn_oldcc'; Triton needs gcc, not nvc)"
+      break
+    fi
+  done
+fi
+unset _polyattn_badcc _g _polyattn_oldcc
