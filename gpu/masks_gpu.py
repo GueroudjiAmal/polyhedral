@@ -6,7 +6,7 @@ below is called by the correctness suite rather than trusted.
 from polyattn import masks
 
 # Triton constexpr mask kinds. d = q_idx - kv_idx throughout.
-CAUSAL, WINDOW, DILATED, LOCAL_STRIDED, TWOBAND = 0, 1, 2, 3, 4
+CAUSAL, WINDOW, DILATED, LOCAL_STRIDED, TWOBAND, SINKS = 0, 1, 2, 3, 4, 5
 
 SPECS = {
     "causal":         (CAUSAL, 0, 0, 0, lambda: masks.Causal()),
@@ -17,6 +17,11 @@ SPECS = {
     "local256+str8":  (LOCAL_STRIDED, 256, 8, 0, lambda: masks.LocalStrided(256, 8)),
     "twoband-1024":   (TWOBAND, 128, 1024, 128, lambda: masks.TwoBand(128, 1024)),
     "twoband-1000":   (TWOBAND, 128, 1000, 128, lambda: masks.TwoBand(128, 1000)),
+    # exp8 cell 1. NOT diagonally invariant -- the sink term is on absolute kv --
+    # and it was missing from SPECS, so exp8 would have died on a KeyError even
+    # after the tuple bug was fixed. Found by tools/dryrun_experiments.py.
+    "sinks4+win256":  (SINKS, 256, 4, 0, lambda: masks.SinksWindow(4, 256)),
+    "sinks4+win8":    (SINKS, 8, 4, 0, lambda: masks.SinksWindow(4, 8)),
 }
 
 
@@ -43,6 +48,8 @@ def flex_mask_mod(name):
     if kind == TWOBAND:
         return lambda b, h, q, kv: (q >= kv) & (((q - kv) < p0)
                                                 | (((q - kv) >= p1) & ((q - kv) < p1 + p2)))
+    if kind == SINKS:
+        return lambda b, h, q, kv: (q >= kv) & (((q - kv) < p0) | (kv < p1))
     raise ValueError(kind)
 
 

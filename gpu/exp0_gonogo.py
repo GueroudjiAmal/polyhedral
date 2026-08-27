@@ -43,40 +43,23 @@ OUR_TILES = ((128, 128), (16, 16))
 LAUNCH = ((1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (2, 4),
           (4, 1), (4, 2), (4, 3), (8, 2), (8, 3))
 
-#: num_warps cannot go below 1, so a winner at w1 is a HARDWARE FLOOR, not a
-#: sweep that was too narrow. num_stages CAN go to 1, so s2 as the minimum was a
-#: genuine gap -- run 2 reported "ON SWEEP BOUNDARY (warps)" for both 16x16 rows,
-#: which was a false alarm, while the real gap (stages) went unflagged on the
-#: 128x128 row. The detector below distinguishes them.
-_HARD_FLOOR = {"warps": 1, "stages": 1}
+from launchsweep import LAUNCH, _HARD_FLOOR, _warn_if_on_boundary  # noqa: E402
 
 
 class _Dense:
+    """Wrap an explicit boolean matrix in the polyattn mask interface.
+
+    Removed by an over-broad edit that replaced a comment block with an import;
+    exp0 still referenced it twice. Caught by tools/dryrun_experiments.py, which
+    is the fourth real bug that CPU dry run has found.
+    """
+
     def __init__(self, M):
         self.M = M
+
     def row_cols(self, q, N):
         return self.M[q]
 
-
-def _warn_if_on_boundary(cfg, label=""):
-    """A winner at the edge of the sweep is a sweep that was too narrow.
-
-    This is what the first run did silently: both 16x16 rows chose the minimum
-    num_warps AND the minimum num_stages offered, and nothing said so.
-    """
-    if cfg is None:
-        return ""
-    w, st = (int(x[1:]) for x in cfg.split("/"))
-    ws = sorted({c[0] for c in LAUNCH})
-    ss = sorted({c[1] for c in LAUNCH})
-    edge = []
-    for n, v, lo, hi in (("warps", w, ws[0], ws[-1]), ("stages", st, ss[0], ss[-1])):
-        if v == hi:
-            edge.append(f"{n} at sweep max")
-        elif v == lo and lo > _HARD_FLOOR[n]:
-            edge.append(f"{n} at sweep min, floor is {_HARD_FLOOR[n]}")
-        # v == lo == hard floor: the hardware limit, not a narrow sweep
-    return f"  <-- SWEEP TOO NARROW ({'; '.join(edge)}){label}" if edge else ""
 
 
 #: The sweep used in run 1, kept so the widening can be measured WITHIN a job.

@@ -50,6 +50,8 @@ unambiguous whichever way it lands, which is why it runs first.
 """
 import sys
 
+from collections import namedtuple as _NT
+
 import numpy as np
 import torch
 
@@ -58,20 +60,7 @@ import blockindex, bench, masks_gpu, permute                # noqa: E402
 from triton_attn import block_sparse_attention              # noqa: E402
 
 D, BH = 64, 8
-#: Widened after the first run: BOTH 16x16 rows picked w2/s2, the minimum of
-#: both parameters in the original sweep ((4,2),(8,2),(4,3),(8,3),(2,2)). A winner
-#: on the boundary means the optimum may lie outside what was offered, and both
-#: headline numbers -- the 1.61x small-tile penalty and the 3.19x transform gain --
-#: came from those rows. num_warps=1 is legal and was never tried.
-LAUNCH = ((1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (2, 4),
-          (4, 1), (4, 2), (4, 3), (8, 2), (8, 3))
-
-#: num_warps cannot go below 1, so a winner at w1 is a HARDWARE FLOOR, not a
-#: sweep that was too narrow. num_stages CAN go to 1, so s2 as the minimum was a
-#: genuine gap -- run 2 reported "ON SWEEP BOUNDARY (warps)" for both 16x16 rows,
-#: which was a false alarm, while the real gap (stages) went unflagged on the
-#: 128x128 row. The detector below distinguishes them.
-_HARD_FLOOR = {"warps": 1, "stages": 1}
+from launchsweep import LAUNCH, _HARD_FLOOR, _warn_if_on_boundary  # noqa: E402
 
 CELLS = [
     ("1  sinks4+win256", "sinks4+win256", 1024, 128, 128, (None, 8),
@@ -81,6 +70,14 @@ CELLS = [
     ("3  local256+str8", "local256+str8", 2048, 128, 32, (None, 2, 4),
      {"rp2": (408, 40), "rp4": (424, 34)}, "counting->rp2 1.04x  makespan->rp4 1.18x"),
 ]
+
+
+class Best(_NT("Best", "ms sd warps stages")):
+    __slots__ = ()
+
+    @property
+    def cfg(self):
+        return f"w{self.warps}/s{self.stages}"
 
 
 class _Dense:
@@ -124,7 +121,11 @@ def main():
             bi = blockindex.build(_Dense(Mv), N, BQ, A)
             idx = blockindex.to_cuda(bi)
             qp, kp, vp = (permute.apply_perm(x, perm) for x in (q, k, v))
-            best = (float("inf"), 0.0, None)
+            # NAMED, not positional. This was a 3-tuple (ms, sd, "w1/s3") and
+            # the paired-timing edit indexed best[3] for the stage count -- an
+            # IndexError that syntax-checked clean and killed both exp8 jobs on
+            # the GPU. Fields cannot be miscounted.
+            best = Best(float("inf"), 0.0, None, None)
             for w, st in LAUNCH:
                 try:
                     ms, sd = bench.time_ms(lambda: block_sparse_attention(
@@ -133,10 +134,10 @@ def main():
                         num_warps=w, num_stages=st), warmup=25, reps=200)
                 except Exception:
                     continue
-                if ms < best[0]:
-                    best = (ms, sd, f"w{w}/s{st}")
-            res[tag] = (tot, mx, runs, *best)
-            bw, bst = best[2], best[3]
+                if ms < best.ms:
+                    best = Best(ms, sd, w, st)
+            res[tag] = (tot, mx, runs, best.ms, best.sd, best.cfg)
+            bw, bst = best.warps, best.stages
             if bw is not None:
                 _thunks[tag] = lambda qp=qp, kp=kp, vp=vp, idx=idx, perm=perm, \
                                       BQ=BQ, A=A, bw=bw, bst=bst: \

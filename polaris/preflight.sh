@@ -63,3 +63,13 @@ echo
 [ "$fail" -eq 0 ] && echo "preflight clean -- qsub -A $proj polaris/job_gonogo.pbs" \
                   || echo "preflight FAILED -- fix the above before qsub"
 exit "$fail"
+
+# Control-flow dry run. Two exp8 jobs died on the GPU with an IndexError that
+# py_compile could not see; this stubs torch/triton and runs every experiment's
+# main() end to end on CPU in seconds. It found three real bugs the first time.
+if python tools/dryrun_experiments.py >/tmp/.pa_dry 2>&1; then
+  ok "all experiments' control flow runs (tools/dryrun_experiments.py)"
+else
+  bad "an experiment would die on the GPU -- see below"
+  tail -6 /tmp/.pa_dry | sed 's/^/         /'
+fi
