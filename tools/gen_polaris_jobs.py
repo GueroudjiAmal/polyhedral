@@ -102,35 +102,72 @@ rc=$?
 echo "exit $rc" >> "$D/meta.txt"
 echo; echo "---------------- $D/out.txt ----------------"
 cat "$D/out.txt"
+
+# SELF-CHAINING. The debug queue caps how many jobs one user may have QUEUED, so
+# submitting eleven at once is rejected outright and dependency chains do not
+# help -- a dependent job still sits in Q. Instead each job launches its
+# successor as its last act: exactly one job in the queue at any moment, no
+# login session to keep alive. `touch polaris/STOP` halts the chain.
+bash polaris/chain_next.sh {name} $rc || true
 exit $rc
 """
 
+CHAIN = """#!/usr/bin/env bash
+# Launch the successor of $1. Called by a running job as its last act.
+#   $1 = name of the job that just finished    $2 = its exit code
+set -uo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+me="${1:?}"; rc="${2:-0}"
+
+[ -f polaris/STOP ] && { echo "chain: STOP present, not continuing"; exit 0; }
+[ -f polaris/.chain.conf ] || { echo "chain: no .chain.conf, not continuing"; exit 0; }
+. polaris/.chain.conf                       # provides ACCT
+
+# The gate is the only job whose failure stops the chain. A single broken
+# experiment should not cost the other nine their slots.
+if [ "$me" = gate ] && [ "$rc" -ne 0 ]; then
+  echo "chain: GATE FAILED (rc=$rc) -- stopping. Nothing downstream would mean anything."
+  exit 0
+fi
+
+next=$(awk -v me="$me" 'f{print; exit} $0==me{f=1}' polaris/jobs/ORDER)
+if [ -z "$next" ]; then echo "chain: $me was last -- done."; exit 0; fi
+
+id=$(qsub -A "$ACCT" "polaris/jobs/$next.pbs" 2>&1) && \
+  echo "chain: $me -> $next  $id" || \
+  echo "chain: FAILED to submit $next: $id" >&2
+"""
+
 SUBMIT = """#!/usr/bin/env bash
-# Submit every job. The gate goes first; everything else waits for it to PASS and
-# then runs CONCURRENTLY -- ten small debug-queue jobs schedule far sooner than
-# one three-hour block, and a failure or preemption costs one experiment.
+# Start the chain. Submits ONE job; each job launches its successor when it
+# finishes, so only one is ever in the queue -- the debug queue rejects a batch
+# submission with "would exceed per-user limit of jobs in Q state", and a
+# dependency chain does not help because dependent jobs still occupy Q.
 #
-#   ./polaris/submit_all.sh <project>            # gate + all, dependent
-#   ./polaris/submit_all.sh <project> cell3 fixed  # just these, still after gate
+#   ./polaris/submit_all.sh <project>          # whole chain from the gate
+#   ./polaris/submit_all.sh <project> fixed    # resume the chain at `fixed`
+#
+# Stop it:  touch polaris/STOP      Resume:  rm polaris/STOP && ./submit_all.sh ...
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-A="${1:?usage: submit_all.sh <project> [job ...]}"; shift || true
+A="${1:?usage: submit_all.sh <project> [start-at-job]}"
+START="${2:-gate}"
 
-GATE=$(qsub -A "$A" polaris/jobs/gate.pbs)
-echo "gate           $GATE"
+grep -qx "$START" polaris/jobs/ORDER || {
+  echo "unknown job '$START'. Order is:"; sed 's/^/  /' polaris/jobs/ORDER; exit 1; }
 
-want=("$@")
-for f in polaris/jobs/*.pbs; do
-  n=$(basename "$f" .pbs); [ "$n" = gate ] && continue
-  if [ ${#want[@]} -gt 0 ]; then
-    printf '%s\\n' "${want[@]}" | grep -qx "$n" || continue
-  fi
-  id=$(qsub -A "$A" -W depend=afterok:"$GATE" "$f")
-  printf '%-14s %s\\n' "$n" "$id"
-done
+printf 'ACCT=%s\n' "$A" > polaris/.chain.conf
+rm -f polaris/STOP
+
+id=$(qsub -A "$A" "polaris/jobs/$START.pbs")
+echo "chain started at '$START':  $id"
 echo
-echo "watch:   qstat -u \\$USER"
-echo "results: results/<job>/latest/out.txt"
+echo "remaining, in order:"
+awk -v s="$START" 'f||$0==s{f=1; print "  " $0}' polaris/jobs/ORDER
+echo
+echo "watch:    qstat -u \\$USER"
+echo "results:  results/<job>/latest/out.txt"
+echo "halt:     touch polaris/STOP   (current job finishes, successor not submitted)"
 """
 
 
@@ -143,9 +180,11 @@ def main():
                                      decides=decides))
         p.chmod(p.stat().st_mode | stat.S_IEXEC)
         (REPO / "results" / name).mkdir(parents=True, exist_ok=True)
-    s = REPO / "polaris" / "submit_all.sh"
-    s.write_text(SUBMIT)
-    s.chmod(s.stat().st_mode | stat.S_IEXEC)
+    (OUT / "ORDER").write_text("\n".join(j[0] for j in JOBS) + "\n")
+    for fname, text in (("submit_all.sh", SUBMIT), ("chain_next.sh", CHAIN)):
+        s = REPO / "polaris" / fname
+        s.write_text(text)
+        s.chmod(s.stat().st_mode | stat.S_IEXEC)
     print(f"wrote {len(JOBS)} jobs to polaris/jobs/ and polaris/submit_all.sh")
     for name, _, _, q, w, d in JOBS:
         print(f"  {name:<9} {q:<12} {w}  {d}")

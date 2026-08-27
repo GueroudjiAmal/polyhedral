@@ -59,4 +59,11 @@ rc=$?
 echo "exit $rc" >> "$D/meta.txt"
 echo; echo "---------------- $D/out.txt ----------------"
 cat "$D/out.txt"
+
+# SELF-CHAINING. The debug queue caps how many jobs one user may have QUEUED, so
+# submitting eleven at once is rejected outright and dependency chains do not
+# help -- a dependent job still sits in Q. Instead each job launches its
+# successor as its last act: exactly one job in the queue at any moment, no
+# login session to keep alive. `touch polaris/STOP` halts the chain.
+bash polaris/chain_next.sh gonogo $rc || true
 exit $rc

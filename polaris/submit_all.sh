@@ -1,26 +1,31 @@
 #!/usr/bin/env bash
-# Submit every job. The gate goes first; everything else waits for it to PASS and
-# then runs CONCURRENTLY -- ten small debug-queue jobs schedule far sooner than
-# one three-hour block, and a failure or preemption costs one experiment.
+# Start the chain. Submits ONE job; each job launches its successor when it
+# finishes, so only one is ever in the queue -- the debug queue rejects a batch
+# submission with "would exceed per-user limit of jobs in Q state", and a
+# dependency chain does not help because dependent jobs still occupy Q.
 #
-#   ./polaris/submit_all.sh <project>            # gate + all, dependent
-#   ./polaris/submit_all.sh <project> cell3 fixed  # just these, still after gate
+#   ./polaris/submit_all.sh <project>          # whole chain from the gate
+#   ./polaris/submit_all.sh <project> fixed    # resume the chain at `fixed`
+#
+# Stop it:  touch polaris/STOP      Resume:  rm polaris/STOP && ./submit_all.sh ...
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-A="${1:?usage: submit_all.sh <project> [job ...]}"; shift || true
+A="${1:?usage: submit_all.sh <project> [start-at-job]}"
+START="${2:-gate}"
 
-GATE=$(qsub -A "$A" polaris/jobs/gate.pbs)
-echo "gate           $GATE"
+grep -qx "$START" polaris/jobs/ORDER || {
+  echo "unknown job '$START'. Order is:"; sed 's/^/  /' polaris/jobs/ORDER; exit 1; }
 
-want=("$@")
-for f in polaris/jobs/*.pbs; do
-  n=$(basename "$f" .pbs); [ "$n" = gate ] && continue
-  if [ ${#want[@]} -gt 0 ]; then
-    printf '%s\n' "${want[@]}" | grep -qx "$n" || continue
-  fi
-  id=$(qsub -A "$A" -W depend=afterok:"$GATE" "$f")
-  printf '%-14s %s\n' "$n" "$id"
-done
+printf 'ACCT=%s
+' "$A" > polaris/.chain.conf
+rm -f polaris/STOP
+
+id=$(qsub -A "$A" "polaris/jobs/$START.pbs")
+echo "chain started at '$START':  $id"
 echo
-echo "watch:   qstat -u \$USER"
-echo "results: results/<job>/latest/out.txt"
+echo "remaining, in order:"
+awk -v s="$START" 'f||$0==s{f=1; print "  " $0}' polaris/jobs/ORDER
+echo
+echo "watch:    qstat -u \$USER"
+echo "results:  results/<job>/latest/out.txt"
+echo "halt:     touch polaris/STOP   (current job finishes, successor not submitted)"
