@@ -16,7 +16,26 @@ import torch
 import triton
 import triton.language as tl
 
-CAUSAL, WINDOW, DILATED, LOCAL_STRIDED, TWOBAND = 0, 1, 2, 3, 4
+# Triton >= 3.x refuses to read a plain Python global from inside @triton.jit:
+#   "Cannot access global variable CAUSAL ... only ... annotated as constexpr"
+# The annotation form keeps the runtime value a plain int, so host-side code and
+# masks_gpu.py are unaffected.
+CAUSAL: tl.constexpr = 0
+WINDOW: tl.constexpr = 1
+DILATED: tl.constexpr = 2
+LOCAL_STRIDED: tl.constexpr = 3
+TWOBAND: tl.constexpr = 4
+
+# These duplicate masks_gpu.py's copy, and the docstring of _live claims the two
+# mirror each other. Claiming is not checking: a silent divergence would send
+# every masked tile down the wrong predicate and still produce plausible output.
+def _assert_kinds_match():
+    import masks_gpu as _m
+    mine = dict(CAUSAL=CAUSAL, WINDOW=WINDOW, DILATED=DILATED,
+                LOCAL_STRIDED=LOCAL_STRIDED, TWOBAND=TWOBAND)
+    theirs = {k: getattr(_m, k) for k in mine}
+    if mine != theirs:
+        raise RuntimeError(f"kind constants diverged: triton_attn={mine} masks_gpu={theirs}")
 
 
 @triton.jit
@@ -110,6 +129,7 @@ def block_sparse_attention(q, k, v, kv_idx, kv_num, kv_partial,
         perm_q = torch.arange(N, device=q.device, dtype=torch.int32)
     if perm_kv is None:
         perm_kv = perm_q
+    _assert_kinds_match()
     assert N % BQ == 0 and N % A == 0, "cost model and kernel both assume this"
     assert k.shape == v.shape == q.shape
     o = torch.empty_like(q)
