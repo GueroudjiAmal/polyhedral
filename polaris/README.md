@@ -10,17 +10,56 @@ single-kernel microbenchmarks, not a scaling study.
 
 ## Three commands
 
-**Run everything in one shot:**
+**Run everything as small jobs (recommended):**
 
 ```bash
 ./polaris/setup.sh                                  # LOGIN node, once
 ./polaris/preflight.sh <your_project>
-qsub -A <your_project> polaris/job_all.pbs          # ~1-3 h, preemptable
+./polaris/submit_all.sh <your_project>              # gate + 10 jobs
 ```
 
-`job_all.pbs` runs the gate then all nine experiments in priority order, one
-output file each under `results/all-<stamp>-*.txt`, continuing past any failure.
-Individual jobs below are still there for quick single questions.
+Eleven small jobs instead of one three-hour block: ten fit the **debug** queue
+(≤50 min) and schedule far sooner, and a failure or preemption costs one
+experiment rather than the run. The gate goes first; everything else is submitted
+with `-W depend=afterok:<gate>` so nothing burns a slot if the kernel is broken.
+
+**Each job writes its own directory**, with a `latest` symlink:
+
+```
+results/<job>/<stamp>/meta.txt   job, host, GPU, CC, exit code
+results/<job>/<stamp>/env.txt    env_check output
+results/<job>/<stamp>/out.txt    the experiment
+results/<job>/latest -> <stamp>
+```
+
+Read them with `cat results/*/latest/out.txt`, or one at a time.
+
+Subset: `./polaris/submit_all.sh <project> cell3 fixed` — still gated.
+
+| job | queue | wall | decides |
+|---|---|---|---|
+| `gate` | debug | 20m | **nothing else counts if this fails** |
+| `cell3` | debug | 20m | the only parameter-free falsifier in the set |
+| `gonogo` | debug | 30m | headline, fresh-compiled FlexAttention baseline |
+| `cells` | debug | 40m | all three cells, paired/interleaved |
+| `fixed` | debug | 40m | out-of-sample test of the fixed-cost account |
+| `imbal` | debug | 30m | counting vs makespan, wave-count control |
+| `select` | debug | 50m | wall-clock argmin vs element argmin |
+| `amort` | debug | 40m | permutation once-per-forward (**prefill only**) |
+| `tiles` | debug | 50m | `p(BQ,A,mask)` — read across masks |
+| `classa` | debug | 30m | class A across tile shapes |
+| `traffic` | preemptable | 90m | lower bound on a class that is modelled, not implemented |
+
+**Caveat on concurrency:** ALCF limits how many jobs one user can have running in
+`debug`. If that limit is 1, these serialise rather than fanning out — still
+better than one long block, because results arrive incrementally and the queue
+wait per job is short, but do not expect all ten at once. If they serialise and
+you want them faster, move the later ones to `preemptable` in
+`tools/gen_polaris_jobs.py` and regenerate.
+
+The jobs are **generated** — edit the table in `tools/gen_polaris_jobs.py` and
+rerun it, never the `.pbs` files. Ten hand-maintained job scripts drift, and that
+has already cost this project two queue slots.
 
 ---
 
