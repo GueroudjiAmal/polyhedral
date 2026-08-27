@@ -10,6 +10,20 @@ single-kernel microbenchmarks, not a scaling study.
 
 ## Three commands
 
+**Run everything in one shot:**
+
+```bash
+./polaris/setup.sh                                  # LOGIN node, once
+./polaris/preflight.sh <your_project>
+qsub -A <your_project> polaris/job_all.pbs          # ~1-3 h, preemptable
+```
+
+`job_all.pbs` runs the gate then all nine experiments in priority order, one
+output file each under `results/all-<stamp>-*.txt`, continuing past any failure.
+Individual jobs below are still there for quick single questions.
+
+---
+
 ```bash
 # 1. on a LOGIN node (compute nodes have no outbound network)
 ./polaris/setup.sh

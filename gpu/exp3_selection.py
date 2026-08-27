@@ -59,6 +59,8 @@ def main():
     torch.manual_seed(0)
     q, k, v = (torch.randn(BH, N, D, device="cuda", dtype=torch.float16) for _ in range(3))
     disagreements = 0
+    skipped = []
+    total_cells = 0
     for name in NAMES:
         m = masks_gpu.numpy_mask(name)
         kind, p0, p1, p2 = masks_gpu.triton_params(name)
@@ -82,10 +84,22 @@ def main():
                 ms[tag] = bench.time_ms(lambda: block_sparse_attention(
                     qv, kv_, vv, *idx, kind, p0, p1, p2, BQ, A,
                     perm_q=perm.int(), perm_kv=perm.int()), reps=60)[0]
+            # PRECONDITION. A cell where the candidates are within `margin` on
+            # element count cannot exhibit a counting-vs-hardware disagreement at
+            # all, so counting it as "agreement" is counting a cell that could
+            # not have disagreed. Without this, a clean zero is ambiguous between
+            # (i) hardware agrees with counting, (ii) the candidate set was too
+            # narrow, (iii) there was nothing to disagree about -- and only (i) is
+            # the answer anyone would draw.
+            lo2 = sorted(el.values())[:2]
+            if len(lo2) < 2 or lo2[0] == 0 or (lo2[1] - lo2[0]) / lo2[0] < 0.02:
+                skipped.append(f"{name} {BQ}x{A}")
+                continue
             a_el = min(el, key=el.get)
             a_ms = min(ms, key=ms.get)
             agree = a_el == a_ms
             disagreements += (not agree)
+            total_cells += 1
             rows.append([f"{BQ}x{A}", a_el, a_ms, "yes" if agree else "NO",
                          ms[a_ms] / ms[a_el] if not agree else 1.0])
         bench.report(
@@ -101,7 +115,12 @@ def main():
     print("  The count below is for THIS set. The same masks under {identity, rp2,")
     print("  rp4} can give 0% where this gives 38%. Widening only adds")
     print("  disagreements, so a small number here is not a small effect.")
-    print(f"TOTAL DISAGREEMENTS: {disagreements}")
+    if skipped:
+        print(f"SKIPPED {len(skipped)} cell(s) with <2% element-count separation --")
+        print("  no counting-level disagreement was possible, so they cannot")
+        print("  contribute evidence either way: " + ", ".join(skipped[:6])
+              + (" ..." if len(skipped) > 6 else ""))
+    print(f"TOTAL DISAGREEMENTS: {disagreements}  (over {total_cells} scored cells)")
     print("Zero -> the element-count cost model is a valid transform selector.")
     print("Nonzero -> it is not, and NOTES novelty item 1 needs restating.")
 

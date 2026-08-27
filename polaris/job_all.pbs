@@ -1,0 +1,91 @@
+#!/bin/bash -l
+#PBS -N polyattn-all
+#PBS -A CHANGE_ME_PROJECT
+#PBS -q preemptable
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=03:00:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+#PBS -o logs/
+
+# EVERYTHING, in priority order, one output file each.
+#
+# Submit with:  qsub -A <project> polaris/job_all.pbs
+#
+# Order is by what each experiment can DECIDE, not by number. Each writes its own
+# file, so a preemption costs the tail rather than the run, and a failure in one
+# does not stop the others.
+
+set -uo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+mkdir -p logs results
+
+if [ -f polaris/env.generated.sh ]; then . polaris/env.generated.sh; else
+  echo "FATAL: run polaris/setup.sh on a login node first." >&2; exit 1; fi
+module use /soft/modulefiles
+set +u
+module --ignore_cache load "${POLYATTN_MODULE:-conda}" 2>/dev/null || \
+  echo "WARN: module load failed, continuing -- the venv is what matters." >&2
+conda activate base 2>/dev/null || true
+source "$POLYATTN_VENV/bin/activate"
+set -u
+
+# Pin the host compiler: when the module load fails, PrgEnv-nvidia's nvc is
+# picked and rejects -Wno-psabi, which kills EVERY inductor compile and looks
+# like a FlexAttention bug. Cost us a whole diagnostic job.
+if command -v gcc >/dev/null; then
+  export CC="$(command -v gcc)" CXX="$(command -v g++)"
+fi
+echo "host compiler for inductor: ${CC:-<unset>}"
+
+export CUDA_VISIBLE_DEVICES=0
+export TRITON_CACHE_DIR="$PWD/.triton-cache-$PBS_JOBID"
+export TORCHINDUCTOR_CACHE_DIR="$PWD/.inductor-cache-$PBS_JOBID"
+
+STAMP="$(date +%Y%m%d-%H%M%S)-${PBS_JOBID%%.*}"
+echo "host $(hostname)  $(date -Is)  stamp $STAMP" | tee "results/all-$STAMP.meta"
+nvidia-smi --query-gpu=name,compute_cap --format=csv | tee -a "results/all-$STAMP.meta"
+
+run () {                                   # run <script> <label...> [argv]
+  local s="$1"; shift
+  local lbl="$1"; shift
+  echo; echo "################ $s $* -- $lbl ################"
+  local out="results/all-$STAMP-${s%.py}${1:+-$1}.txt"
+  if timeout 45m python "gpu/$s" "$@" > "$out" 2>&1; then
+    echo "  OK   -> $out"; tail -25 "$out"
+  else
+    echo "  FAILED (exit $?) -> $out"; tail -15 "$out"
+  fi
+}
+
+python gpu/env_check.py            > "results/all-$STAMP-env.txt" 2>&1
+run test_correctness.py   "GATE: nothing below means anything if this fails"
+run exp0_gonogo.py        "headline, now with a fresh-compiled FlexAttention baseline"
+# exp8 FIRST: it measures coefficients on disagreements between transforms that
+# ARE implemented, on cells the selector actually evaluates. exp6 measures a
+# proxy for class B, which has never executed -- its output is a lower bound that
+# must be composed with kv_per_tile ratios before it says anything, and it cannot
+# change a decision the selector makes today. Preempted after exp0+exp8 you have
+# a headline and a coefficient; after exp0+exp6, a bracket on an unimplemented class.
+# Cell 3 FIRST and alone: the only parameter-free falsifier in the set. If the
+# queue takes the job after one experiment, this is the one to have.
+run exp8_three_cells.py   "CELL 3 ONLY -- the parameter-free falsifier" 3
+run exp8_three_cells.py   "all three cells, paired/interleaved timing"
+run exp6_traffic_multiplier.py "LOWER BOUND on a class that is modelled, not implemented"
+run exp9_fixed_cost.py    "out-of-sample test of the fixed-cost account (b5's cell)"
+run exp7_load_imbalance.py "counting vs makespan, with a wave-count control"
+run exp3_selection.py     "does the wall-clock argmin match the element argmin"
+run exp5_amortisation.py  "is the permutation really once-per-forward (prefill only)"
+run exp1_tile_shape.py    "p(BQ,A,mask): read ACROSS masks, not down one column"
+run exp2_class_a.py       "class A across tile shapes"
+
+# exp4 is NOT run. It was "the baseline sweep", and sub-128 is unreachable in
+# torch 2.6.0, so its sweep has exactly one point -- which exp0 already measures.
+# An experiment whose outcome space collapsed to a single value is not an
+# experiment. Kept in the tree as a regression probe: run it by hand against a
+# newer torch to see whether sub-128 became reachable.
+echo; echo "SKIPPED exp4_flex_baseline.py -- one reachable block size in torch 2.6.0,"
+echo "        already covered by exp0. See gpu/exp4_flex_baseline.py header."
+
+echo; echo "all outputs: results/all-$STAMP-*.txt"

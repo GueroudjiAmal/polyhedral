@@ -108,7 +108,8 @@ def main():
         q, k, v = (torch.randn(BH, N, D, device="cuda", dtype=torch.float16)
                    for _ in range(3))
 
-        res = {}
+        res, _PAIRED = {}, {}
+        _thunks = {}
         for s in folds:
             tag = "identity" if s is None else f"rp{s}"
             p_np = (permute.identity_perm(N) if s is None
@@ -135,11 +136,35 @@ def main():
                 if ms < best[0]:
                     best = (ms, sd, f"w{w}/s{st}")
             res[tag] = (tot, mx, runs, *best)
+            bw, bst = best[2], best[3]
+            if bw is not None:
+                _thunks[tag] = lambda qp=qp, kp=kp, vp=vp, idx=idx, perm=perm, \
+                                      BQ=BQ, A=A, bw=bw, bst=bst: \
+                    block_sparse_attention(qp, kp, vp, *idx, kind, p0, p1, p2,
+                                           BQ, A, perm_q=perm.int(),
+                                           perm_kv=perm.int(), num_warps=bw,
+                                           num_stages=bst)
 
         for tag, (tot, mx, runs, ms, sd, cfg) in res.items():
             print(f"    {tag:<10} tiles {tot:>5}  max {mx:>4}  runs {runs:>4}   "
                   f"{ms:.4f} +- {sd:.4f} ms  [{cfg}]"
                   + _warn_if_on_boundary(cfg))
+        # PAIRED re-measurement of the two comparands, INTERLEAVED. The loop
+        # above times each variant fully before starting the next, so any drift
+        # over that window is confounded with the A-vs-B difference -- and cell 2's
+        # margin is 5.9% against a 2% CV. Alternating cancels drift to first
+        # order; the paired RATIO is the statistic to trust, not the medians.
+        tags = list(res)[:2]
+        if len(tags) == 2 and all(t in _thunks for t in tags):
+            _PAIRED[label] = (_thunks[tags[0]], _thunks[tags[1]])
+        if _PAIRED.get(label) is not None:
+            fa_, fb_ = _PAIRED[label]
+            ma, mb, rat, rsd = bench.paired_time(fa_, fb_, warmup=15, reps=120)
+            print(f"    PAIRED (interleaved)  {tags[0]} {ma:.4f}  {tags[1]} {mb:.4f}"
+                  f"   ratio {rat:.4f} +- {rsd:.4f}")
+            res[tags[0]] = res[tags[0]][:3] + (ma, rsd * ma) + res[tags[0]][5:]
+            res[tags[1]] = res[tags[1]][:3] + (mb, rsd * mb) + res[tags[1]][5:]
+
         cv = {t: r[4] / r[3] for t, r in res.items() if r[3]}
         print(f"    coefficient of variation: "
               + "  ".join(f"{t} {c*100:.1f}%" for t, c in cv.items()))
@@ -178,4 +203,13 @@ def main():
 
 
 if __name__ == "__main__":
+    # `python exp8_three_cells.py 3` runs cell 3 only. Under queue uncertainty it
+    # is the single most valuable thing in the whole set: the ONLY parameter-free
+    # falsifier -- it returns a direction, and if rp2 wins the wave account is
+    # dead outright with no coefficient to retreat behind. Everything else,
+    # exp6 included, returns a number some account can absorb.
+    if len(sys.argv) > 1:
+        want = set(sys.argv[1:])
+        CELLS = [c for c in CELLS if c[0].split()[0] in want]
+        print(f"running only cell(s) {sorted(want)}\n")
     raise SystemExit(main())

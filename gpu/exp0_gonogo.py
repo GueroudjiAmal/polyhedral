@@ -168,22 +168,35 @@ def main():
 
     try:
         from torch.nn.attention.flex_attention import create_block_mask, flex_attention
-        fa = torch.compile(flex_attention, dynamic=False)
         mod = masks_gpu.flex_mask_mod(NAME)
+        # FlexAttention gets a FRESH compile per configuration, with a dynamo reset
+        # between them. Reusing one compiled callable across configs measured the
+        # same dilated-8 baseline at 0.322 ms in exp0 and 0.3953 ms in the
+        # diagnostic -- 23% apart -- so the reused path was not measuring what it
+        # claimed. Only the WITHIN-JOB ratio against our kernel is quotable.
+        def _flex_time(mod, bs, kopt):
+            torch._dynamo.reset()
+            fa = torch.compile(flex_attention, dynamic=False)
+            bm = create_block_mask(mod, B=None, H=None, Q_LEN=N, KV_LEN=N,
+                                   BLOCK_SIZE=bs, _compile=True)
+            return bench.time_ms(lambda: fa(q4, k4, v4, block_mask=bm, **kopt),
+                                 warmup=25, reps=100)
         for bs in FLEX_BLOCKS:
             try:
-                bm = create_block_mask(mod, B=None, H=None, Q_LEN=N, KV_LEN=N,
-                                       BLOCK_SIZE=bs, _compile=True)
-                # Tell the kernel to use tiles matching the mask. Without this a
-                # sub-128 BlockMask is inconsistent with the template's default
-                # tile and the lowering fails -- which is what produced the bare
-                # `BackendCompilerFailed` in the first two runs.
+                # Sub-128 is STRUCTURALLY IMPOSSIBLE in torch 2.6.0:
+                # kernel_options BLOCK_M/BLOCK_N are dropped before the lowering
+                # (the options dict reaching inductor contains only the four
+                # boolean flags), so the divisibility check always compares
+                # against the default 128. Retained as a regression probe -- if a
+                # future torch plumbs them through, this row starts passing.
                 kopt = {} if bs >= 128 else {"kernel_options": {"BLOCK_M": bs,
                                                                 "BLOCK_N": bs}}
-                t = bench.time_ms(lambda: fa(q4, k4, v4, block_mask=bm, **kopt), reps=50)[0]
+                t, sd = _flex_time(mod, bs, kopt)
                 rows.append([f"FlexAttention {bs}x{bs}"
-                             + ("  (default)" if bs == 128 else ""), float("nan"),
-                             t, "-", float("nan"), base_ms / t])
+                             + ("  (only size this torch supports)" if bs == 128
+                                else ""), float("nan"),
+                             f"{t:.4f} cv{sd/t*100:.0f}%", "-", float("nan"),
+                             base_ms / t])
             except Exception as e:
                 rows.append([f"FlexAttention {bs}x{bs}", float("nan"),
                              f"FAIL {_why(e)}", "-", float("nan"),

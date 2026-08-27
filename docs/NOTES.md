@@ -1928,6 +1928,21 @@ returned `BackendCompilerFailed`, so the opponent ran untuned.
 
 ### Scoring the pre-registration (`results/predictions-d4.txt`)
 
+> **RETRACTION — the 1.61× below is UNDER-TUNED and so is everything derived
+> from it.** Widening the launch-config sweep moved it 1.61 → 1.52 → **1.27×**
+> with no other change: a third of what was recorded as a hardware property was
+> this session's own under-tuning. The *direction* stands; the magnitude does
+> not. Read every appearance of 1.61× as **"at least 1.27×, measured"**, and note
+> that 1.27× is itself only safe once the winning launch config is INTERIOR to
+> the swept range on every axis — otherwise it is a lower bound on tuning effort,
+> not on the hardware. Same applies to any claim that used 1.61× as a magnitude.
+
+> **RETRACTION — 2.61× and 2.38× were both derived ACROSS job submissions.** The
+> same dilated-8 FlexAttention configuration measured 0.322 ms and 0.3953 ms in
+> two jobs, 23% apart. Within-job CV is 2%. Neither headline is quotable; both
+> are marked here rather than quietly superseded, and every future number must
+> come from a single submission.
+
 **Prediction 3 — CONFIRMED, and more cleanly than I framed it.** I predicted
 wall-clock would fall short of the element prediction at 16×16 because small
 query tiles cost occupancy the model prices at zero. The 16×16 identity row is
@@ -2068,6 +2083,96 @@ now print their set with that warning attached.
 **One mask-level fact survived:** `docpack` is 0% in every candidate set tested,
 including sets where every other union mask disagrees. Worth keeping precisely
 because it is invariant to the thing that broke the other three conditions.
+
+### FlexAttention below 128 is not reachable through any API we could find in torch 2.6.0
+
+Two runs reported a bare `BackendCompilerFailed` because the experiment captured
+`type(e).__name__` and discarded the message. Unwrapping it took three jobs and
+found **two unrelated failures**:
+
+**A — wrong host compiler, not FlexAttention.** `nvc-Error-Unknown switch:
+-Wno-psabi`. Inductor builds a C helper with the host compiler; when
+`module load` fails, PrgEnv-nvidia's `nvc` stays on PATH and rejects that GCC
+flag, killing *every* compile including 128×128 — the same configuration that
+ran fine in a job where the module load worked. Fixed by pinning `CC=gcc` in all
+job scripts. **A whole diagnostic job produced nothing but this**, because it
+masked the question in exactly the rows built to test it.
+
+**B — the real constraint.** With the compiler fixed, 128×128 compiles under all
+five strategies and 64/32/16 fail identically under all five, including
+`kernel_options={"BLOCK_M": bs, "BLOCK_N": bs}`. The traceback shows why:
+
+> `args[6]: {'PRESCALE_QK': False, 'ROWS_GUARANTEED_SAFE': False,
+> 'BLOCKS_ARE_CONTIGUOUS': False, 'OUTPUT_LOGSUMEXP': True}`
+
+The options dict reaching the lowering **does not contain `BLOCK_M`/`BLOCK_N`** —
+they are dropped on this path, so the divisibility check always compares against
+the default 128. Hypothesis falsified with a receipt.
+
+**The caveat NARROWS. It does not lift — I argued that it did and I was wrong,
+and the strongest counter-argument is in my own log.**
+
+1. **§3a-bis already killed mechanism 2 against Binary Block Masking at 128×32** —
+   a published baseline *already running sub-128 on the KV axis*. So even if
+   FlexAttention were pinned at 128 forever, "128 is the only opponent" is false
+   at the field level. The caveat was never really about FlexAttention's knob; it
+   was about whether a sub-128 incumbent exists. **One does, and I cited it
+   myself two days ago.**
+2. Removing an upper bound requires showing *no stronger baseline exists*, not
+   that one baseline resists one knob. The most this buys is a narrower caveat.
+3. **Which knob failed, precisely:** every sub-128 row reports
+   `flex_attention FAILED`, never `create_block_mask FAILED`. So
+   `create_block_mask(BLOCK_SIZE=64)` *succeeds* — the mask-granularity knob
+   works — and it is the **lowering** that rejects the combination. Those are
+   different parameters and the distinction belongs in any writeup.
+
+So the honest form is **"upper bound against FlexAttention as shipped in torch
+2.6.0"** — version in the sentence, because a caveat that silently depends on a
+library release expires without anyone noticing.
+
+**What genuinely is answered, and the wording matters.** The criticism
+*"you compared against a baseline you did not tune"* is answered — the options
+dict is good evidence the keys never reach the lowering. What replaces it is
+narrower but real: **this is a fact about torch 2.6.0, not about block-sparse
+attention.** FlashInfer ships finer granularity today and a later FlexAttention
+may. So the phrasing is *"FlexAttention at 128×128, the only configuration
+reachable in torch 2.6.0"* — version-pinned, every time. Not "the only opponent".
+
+Nor "structurally impossible": five strategies were tried and the keys were found
+dropped on one path, which supports *not reachable through any API we could find*
+and not the stronger claim, which a reviewer who knows a sixth path would falsify.
+
+**An outcome this whole experiment set cannot produce.** Every experiment
+compares transforms *within* our framing, so none of them can show the
+permutation is **not worth doing**. The once-per-forward fork is prefill-only —
+KV-cache append breaks it, since new keys arrive in original order and would have
+to be inserted at permuted positions — and nothing measures the decode path,
+where the permutation must be maintained per step. **If decode forces a scatter
+per token the speedup could go to zero or negative, and every experiment in the
+set would still read as a success.** That is the answer with no outcome space,
+and it is the one that decides deployability.
+
+**And an unflattering consequence nobody had stated.** If FlexAttention cannot use
+small tiles and our transform *requires* them, then part of the measured speedup
+is **"we can tile finer than the baseline can"** — a real advantage, but a
+kernel-engineering one rather than the polyhedral contribution. The two cannot be
+cleanly separated, because the permuted mask is only block-diagonal *at small
+block size*: the transform and the tile shape are coupled by construction. The
+writeup must say so rather than let the ratio read as purely the transform.
+
+### Cross-job variance is now the binding constraint
+
+The same dilated-8 FlexAttention configuration measured **0.322 ms** in one job
+and **0.3953 ms** in another — 23% apart, giving headlines of 2.38× and 2.92×.
+Within a job the CV is **2%**. Three separate effects have now been smaller than
+the between-job spread, so **no number derived by comparing across submissions is
+quotable**, including several quoted earlier in this log. Every experiment now
+times its comparands in one process and prints the CV beside the median.
+
+*(A near-miss worth recording: reading the diagnostic's ten "OK" rows I almost
+took 0.2458 ms as the baseline. That is the **causal** row; our kernel is compared
+on **dilated-8**, whose row is 0.3953. Two masks in one table, and the wrong one
+was one line away from the headline.)*
 
 ### What the result reframes
 

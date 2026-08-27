@@ -1,4 +1,17 @@
-"""EXPERIMENT 4 -- against the incumbent, at a tile size it can actually use.
+"""EXPERIMENT 4 -- NOT IN THE DEFAULT RUN. Its outcome space collapsed.
+
+This was "the baseline sweep". Sub-128 BlockMask is not reachable through any API
+found in torch 2.6.0 -- kernel_options BLOCK_M/BLOCK_N are dropped before the
+lowering -- so the sweep has exactly ONE reachable point, which exp0 already
+measures. An experiment with one point in its outcome space is not a sweep.
+
+Kept as a REGRESSION PROBE: run it by hand against a newer torch. If sub-128
+starts compiling, the baseline becomes tunable and every speedup in this project
+needs requoting against a tuned opponent.
+
+Original header follows.
+
+EXPERIMENT 4 -- against the incumbent, at a tile size it can actually use.
 
 docs/NOTES.md sec 3a-bis: comparing only against FlexAttention's 128x128 default
 was picking the weakest opponent, and Binary Block Masking already runs at 128x32.
@@ -44,7 +57,6 @@ def main():
         print(f"flex_attention unavailable: {e}")
         return
     torch.manual_seed(0)
-    fa = torch.compile(flex_attention, dynamic=False)
     q4, k4, v4 = (torch.randn(B, H, N, D, device="cuda", dtype=torch.float16)
                   for _ in range(3))
     q3 = q4.reshape(B * H, N, D).contiguous()
@@ -58,15 +70,16 @@ def main():
         rows = []
         for bs in FLEX_BLOCKS:
             try:
+                # fresh compile per config -- see exp0. A reused callable
+                # measured the same baseline 23% apart across two jobs.
+                torch._dynamo.reset()
+                fa = torch.compile(flex_attention, dynamic=False)
                 bm = create_block_mask(mod, B=None, H=None, Q_LEN=N, KV_LEN=N,
                                        BLOCK_SIZE=bs, _compile=True)
-                # Tell the kernel to use tiles matching the mask. Without this a
-                # sub-128 BlockMask is inconsistent with the template's default
-                # tile and the lowering fails -- which is what produced the bare
-                # `BackendCompilerFailed` in the first two runs.
                 kopt = {} if bs >= 128 else {"kernel_options": {"BLOCK_M": bs,
                                                                 "BLOCK_N": bs}}
-                ms = bench.time_ms(lambda: fa(q4, k4, v4, block_mask=bm, **kopt), reps=50)[0]
+                ms = bench.time_ms(lambda: fa(q4, k4, v4, block_mask=bm, **kopt),
+                                   warmup=25, reps=100)[0]
                 rows.append([f"flex {bs}x{bs}", float("nan"), ms])
             except Exception as e:
                 rows.append([f"flex {bs}x{bs}", float("nan"), f"FAIL {_why(e)}"])

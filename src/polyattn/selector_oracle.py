@@ -360,6 +360,13 @@ def uncovered_regimes():
         "N_q != N_kv is now COVERED -- see tests/test_cost.py, symmetry holds "
         "whenever both tile sizes divide both dimensions.",
         "backward pass -- different access pattern, no selector has been asked",
+        "DECODE with the class A permutation maintained per step. The "
+        "once-per-forward amortisation that the headline rests on is "
+        "PREFILL-ONLY: KV-cache append breaks it, because new keys arrive in "
+        "original order and would have to be inserted at permuted positions. No "
+        "experiment measures it, and if decode forces a per-token scatter the "
+        "measured speedup could go to zero or negative while every experiment in "
+        "the set still reads as a success.",
         "multiple transforms composed; the candidate set is single transforms "
         "and the composition search of NOTES sec 5 is a separate mechanism",
         # 2. Caveats.
