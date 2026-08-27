@@ -41,13 +41,23 @@ module --ignore_cache load "${POLYATTN_MODULE:-conda}" || {
 # conda's activate scripts reference unset variables; `set -u` turns that into
 # an immediate non-zero exit, which PBS reports only as a job that went straight
 # to E with an empty log. Disable -u across activation, restore after.
-set +u
-conda activate base
-if [ ! -f .venv-polaris/bin/activate ]; then
-  echo "FATAL: .venv-polaris missing -- run polaris/setup.sh on a LOGIN node first." >&2
+# setup.sh records which conda module and venv actually worked on the login
+# node. Hard-coding either here is how a job fails in the queue the same way
+# setup.sh already failed interactively.
+if [ ! -f polaris/env.generated.sh ]; then
+  echo "FATAL: polaris/env.generated.sh missing -- run polaris/setup.sh on a LOGIN node first." >&2
   exit 2
 fi
-source .venv-polaris/bin/activate
+source polaris/env.generated.sh
+
+set +u
+module load "$POLYATTN_MODULE"
+conda activate base
+if [ ! -f "$POLYATTN_VENV/bin/activate" ]; then
+  echo "FATAL: venv $POLYATTN_VENV missing -- re-run polaris/setup.sh." >&2
+  exit 2
+fi
+source "$POLYATTN_VENV/bin/activate"
 set -u
 
 # Documented Polaris known issue: software that creates socket files under

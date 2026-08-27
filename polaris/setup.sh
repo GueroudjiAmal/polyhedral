@@ -24,89 +24,58 @@ case "$REPO" in
            echo "   Consider /eagle/<project>/$USER or /grand/<project>/$USER instead." ;;
 esac
 
-# --- how we get a Python ------------------------------------------------
-# --pip-torch DELIBERATELY DOES NOT NEED THE conda MODULE.
+# --- conda base + venv, exactly per the ALCF docs -----------------------
+#   https://docs.alcf.anl.gov/polaris/data-science/python/
+#     module use /soft/modulefiles; module load conda; conda activate base
+#     CONDA_NAME=$(echo ${CONDA_PREFIX} | tr '\/' '\t' | sed -E 's/mconda3|\/base//g' | awk '{print $NF}')
+#     VENV_DIR="$(pwd)/venvs/${CONDA_NAME}"
+#     python -m venv "${VENV_DIR}" --system-site-packages
+#     source "${VENV_DIR}/bin/activate"
 #
-# The documented Polaris flow is `module use /soft/modulefiles; module load
-# conda; conda activate base`. That is what the default path below does. But the
-# site's default conda modulefile can require dependency VERSIONS that are not
-# installed (observed: conda/2025-09-25 wants gcc-native/14.2 and
-# cray-hdf5-parallel/1.14.3.5 while the system provides gcc-native/14). No user
-# action fixes that -- it is a site-side mismatch and belongs in a ticket.
-#
-# So --pip-torch bootstraps from ANY python3 already on PATH and builds a CLEAN
-# venv. It needs no module, and it drops the conda torch entirely, which also
-# drops that build's cray-mpich dependency (libmpi_gnu_NNN.so). Nothing in gpu/
-# uses MPI; every run is single-GPU.
-PIP_TORCH=0
-for a_ in "$@"; do [ "$a_" = "--pip-torch" ] && PIP_TORCH=1; done
+# One deviation, and it is also from the docs: base is read-only, so a broken
+# base package is replaced by SHADOWING it --
+#     python3 -m pip install --ignore-installed <package>
+# That is how we deal with base's torch when it cannot load (see below).
 
-if [ "$PIP_TORCH" = "1" ]; then
-  BOOTSTRAP_PY="$(command -v python3 || command -v python || true)"
-  [ -n "$BOOTSTRAP_PY" ] || { echo "FATAL: no python3 on PATH at all." >&2; exit 1; }
-  echo "== --pip-torch: bootstrapping from $BOOTSTRAP_PY (no module required)"
-  "$BOOTSTRAP_PY" -c 'import sys; assert sys.version_info>=(3,9), sys.version; print("   ", sys.version.split()[0])'
-  LOADED_MODULE="none (--pip-torch)"
+module use /soft/modulefiles
+
+if [ -n "${CONDA_PREFIX:-}" ] && python -c 'import sys' 2>/dev/null; then
+  # base is already active in this shell -- reuse it rather than re-running
+  # `module load conda`, which resolves to the site DEFAULT version and can
+  # fail on a dependency the system does not have.
+  echo "== conda base already active: $CONDA_PREFIX"
 else
-  module use /soft/modulefiles
-  if ! module load conda 2>/tmp/.modload.$$; then
-    cat /tmp/.modload.$$ >&2; rm -f /tmp/.modload.$$
-    cat >&2 <<'HINT'
-
-FATAL: `module load conda` failed.
-
-First establish whether the dependency actually exists:
-
-    module --ignore_cache spider gcc-native
-    module --ignore_cache spider cray-hdf5-parallel
-    module --ignore_cache avail conda
-
-If it EXISTS at the required version, your Lmod cache is stale:
-    rm -rf ~/.lmod.d/.cache ~/.cache/lmod     # then a fresh shell
-
-If it DOES NOT exist, the site's modulefile is broken -- not fixable from here.
-Report it to support@alcf.anl.gov, and meanwhile skip the module entirely:
-
-    bash polaris/setup.sh --pip-torch
-
-HINT
+  module load conda || {
+    echo >&2 "FATAL: module load conda failed. If it names an unknown dependency"
+    echo >&2 "       version, that is a site issue -- report to support@alcf.anl.gov."
+    echo >&2 "       Meanwhile: module --ignore_cache avail conda   and load one that works."
     exit 1
-  fi
-  rm -f /tmp/.modload.$$
-  set +u
-  conda activate base
-  set -u
-  LOADED_MODULE=conda
+  }
+  set +u; conda activate base; set -u
 fi
 
-# TWO WAYS TO GET TORCH. Default is the module's build; --pip-torch is the
-# escape hatch when the module's build is unusable.
-#
-#   inherit (default)  --system-site-packages, uses the conda module's torch.
-#                      Matched to the driver, no download. But on Polaris that
-#                      torch is an HPC build linked against Cray MPICH, and it
-#                      fails with e.g. "libmpi_gnu_123.so.12: cannot open shared
-#                      object file" whenever the PrgEnv it was built against has
-#                      been retired -- which is a site upgrade away at any time.
-#
-#   --pip-torch        clean venv, torch from PyPI. NO Cray MPI dependency at
-#                      all, which is the right trade here: every experiment is
-#                      single-GPU (select=1, CUDA_VISIBLE_DEVICES=0) and nothing
-#                      in gpu/ calls MPI. Costs a ~2.5GB download through the
-#                      ALCF proxy; must match the compute-node driver.
-if [ "$PIP_TORCH" = "1" ]; then
-  echo "== building a CLEAN venv with torch from PyPI (no Cray MPI)"
-  [ -d .venv-polaris ] || "$BOOTSTRAP_PY" -m venv .venv-polaris
-  source .venv-polaris/bin/activate
-  python -m pip install --upgrade pip
-  python -m pip install torch --index-url https://download.pytorch.org/whl/cu124
+CONDA_NAME=$(echo ${CONDA_PREFIX} | tr '\/' '\t' | sed -E 's/mconda3|\/base//g' | awk '{print $NF}')
+VENV_DIR="${REPO}/venvs/${CONDA_NAME}"
+echo "== venv: $VENV_DIR"
+mkdir -p "$VENV_DIR"
+[ -f "$VENV_DIR/bin/activate" ] || python -m venv "$VENV_DIR" --system-site-packages
+source "$VENV_DIR/bin/activate"
+python -m pip install --upgrade pip
+
+# Does the INHERITED torch actually load? base's is an HPC build linked against
+# cray-mpich for a specific GCC; when the site retires that PrgEnv it raises
+# e.g. "libmpi_gnu_123.so.12: cannot open shared object file". Nothing in gpu/
+# uses MPI, so shadow it with a PyPI wheel via the documented --ignore-installed.
+echo "== checking inherited torch"
+if python -c 'import torch' 2>/tmp/.torchchk.$$; then
+  python -c 'import torch; print("   inherited torch OK", torch.__version__, torch.version.cuda)'
 else
-  echo "== building a venv that INHERITS the module's torch"
-  echo "   (re-run with --pip-torch if 'import torch' fails on a Cray library)"
-  [ -d .venv-polaris ] || python -m venv --system-site-packages .venv-polaris
-  source .venv-polaris/bin/activate
-  python -m pip install --upgrade pip
+  echo "   inherited torch FAILED:"; sed 's/^/     /' /tmp/.torchchk.$$ | tail -3
+  echo "   -> shadowing it with a PyPI wheel (docs: pip install --ignore-installed)"
+  python -m pip install --ignore-installed torch \
+      --index-url https://download.pytorch.org/whl/cu124
 fi
+rm -f /tmp/.torchchk.$$
 
 python -m pip install -e ".[dev]"
 
@@ -162,7 +131,7 @@ PYCHK
 
 echo
 echo "== setup done. Next:"
-echo "   module stack that worked: ${LOADED_MODULE:-unknown}"
+echo "   venv: $VENV_DIR"
 
 # Hand the discovered module name to the job scripts. They must not hard-code it:
 # if the site's `conda` modulefile is broken and `frameworks` is the one that
@@ -170,10 +139,9 @@ echo "   module stack that worked: ${LOADED_MODULE:-unknown}"
 # same way this script just failed on the login node.
 cat > polaris/env.generated.sh <<EOSTAMP
 # GENERATED by polaris/setup.sh on $(date -Is) -- do not edit, re-run setup.sh.
-POLYATTN_MODULE="${LOADED_MODULE:-conda}"
-POLYATTN_VENV="$REPO/.venv-polaris"
+POLYATTN_MODULE="conda"
+POLYATTN_VENV="$VENV_DIR"
 EOSTAMP
-echo "   wrote polaris/env.generated.sh (module=${LOADED_MODULE:-conda})"
-echo "   put that same name in polaris/job_*.pbs if it is not 'conda'"
+echo "   wrote polaris/env.generated.sh"
 echo "   bash polaris/preflight.sh <your_project>"
 echo "   qsub -A <your_project> polaris/job_gonogo.pbs"

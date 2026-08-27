@@ -22,8 +22,15 @@ echo "== preflight in $PWD"
              || bad "logs/ missing -- PBS -o logs/ cannot stage output. mkdir -p logs"
 
 # 2. compute nodes have no outbound network, so the venv must already exist.
-[ -f .venv-polaris/bin/activate ] && ok ".venv-polaris present" \
-  || bad ".venv-polaris missing -- run polaris/setup.sh on a login node"
+if [ -f polaris/env.generated.sh ]; then
+  . polaris/env.generated.sh
+  [ -f "$POLYATTN_VENV/bin/activate" ] && ok "venv present: $POLYATTN_VENV" \
+    || bad "venv $POLYATTN_VENV missing -- re-run polaris/setup.sh"
+  python -c 'import torch' 2>/dev/null && ok "torch imports on login node" \
+    || warn "torch does not import here; fine if it is only libcuda, fatal if Cray MPI"
+else
+  bad "polaris/env.generated.sh missing -- run polaris/setup.sh on a login node"
+fi
 
 # 3. an invalid or placeholder project is accepted by qsub, then HELD forever.
 if [ -z "$proj" ]; then
