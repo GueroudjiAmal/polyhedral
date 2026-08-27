@@ -39,7 +39,7 @@ def root_cause(e, depth=6):
     """Unwrap BackendCompilerFailed to the exception that actually happened."""
     seen, cur = [], e
     for _ in range(depth):
-        seen.append(f"{type(cur).__name__}: {str(cur).strip().splitlines()[0][:160]}"
+        seen.append(f"{type(cur).__name__}: {str(cur).strip().splitlines()[0][:300]}"
                     if str(cur).strip() else type(cur).__name__)
         nxt = getattr(cur, "inner_exception", None) or cur.__cause__ or cur.__context__
         if nxt is None or nxt is cur:
@@ -55,6 +55,11 @@ def strategies(bs):
         ("no _compile", dict(BLOCK_SIZE=bs), {}),
         ("kernel_options matched", dict(BLOCK_SIZE=bs, _compile=True),
          dict(kernel_options={"BLOCK_M": bs, "BLOCK_N": bs})),
+        ("kernel_options, fwd+bwd, no autotune", dict(BLOCK_SIZE=bs, _compile=True),
+         dict(kernel_options={"BLOCK_M": bs, "BLOCK_N": bs,
+                              "BLOCK_M1": bs, "BLOCK_N1": bs,
+                              "BLOCK_M2": bs, "BLOCK_N2": bs,
+                              "FORCE_USE_FLEX_ATTENTION": True})),
         ("kernel_options matched + bwd tiles", dict(BLOCK_SIZE=bs, _compile=True),
          dict(kernel_options={"BLOCK_M": bs, "BLOCK_N": bs,
                               "BLOCK_M1": bs, "BLOCK_N1": bs,
@@ -69,7 +74,13 @@ def main():
         print(f"flex_attention unavailable: {e}")
         return 1
     print(f"torch {torch.__version__}   N={N} B={B} H={H} D={D}\n")
-    fa = torch.compile(flex_attention, dynamic=False)
+    print("""NOTE: a SINGLE torch.compile'd callable is reused across calls in
+exp0/exp4, and kernel_options may be baked in at first compile -- so passing
+different kernel_options per call can be silently ignored. That is the leading
+suspect for why the matched-tiles fix landed in exp0 and the 64x64 case still
+failed with the same divisibility error. Each strategy below gets a FRESH
+compile, and torch._dynamo.reset() runs between them, so the option cannot be
+shadowed by a cached graph.\n""")
     q, k, v = (torch.randn(B, H, N, D, device="cuda", dtype=torch.float16)
                for _ in range(3))
 
@@ -88,6 +99,8 @@ def main():
                         print(f"        {line}")
                     continue
                 try:
+                    torch._dynamo.reset()          # no cached graph may survive
+                    fa = torch.compile(flex_attention, dynamic=False)
                     ms = bench.time_ms(lambda: fa(q, k, v, block_mask=bm, **fa_kw),
                                        warmup=10, reps=30)[0]
                     print(tag + f"OK   {ms:.4f} ms")
