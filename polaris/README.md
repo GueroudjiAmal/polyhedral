@@ -14,15 +14,20 @@ single-kernel microbenchmarks, not a scaling study.
 # 1. on a LOGIN node (compute nodes have no outbound network)
 ./polaris/setup.sh
 
-# 2. set your allocation in both job files
-sed -i 's/CHANGE_ME_PROJECT/<your_project>/' polaris/job_*.pbs
+# 2. check everything the queue will check, before the queue does
+./polaris/preflight.sh
 
-# 3. gate first, then the experiments
-qsub polaris/job_gonogo.pbs         # smoke test + THE one measurement, ~10 min
+# 3. gate first, then the experiments. PASS -A ON THE COMMAND LINE.
+qsub -A <your_project> polaris/job_gonogo.pbs      # ~10 min, debug queue
 qstat -u $USER
 #   ... read results/gonogo-*.txt in full ...
-qsub polaris/job_experiments.pbs    # only if the go/no-go says it is worth it
+qsub -A <your_project> polaris/job_experiments.pbs # only if the go/no-go warrants it
 ```
+
+The scripts deliberately carry **no `#PBS -A` directive**. PBS Pro accepts an
+invalid account at submit time and then holds the job indefinitely with no log
+written — a placeholder left in the file fails *silently*. Passing `-A` on the
+command line fails *loudly* if you forget it.
 
 **Submit `job_gonogo.pbs` first, not the full suite.** It runs the correctness
 gate and then exactly one measurement: `dilated-8 + residue-perm-8`, the case
@@ -68,6 +73,55 @@ Everything lands in `results/` stamped with the date and job id.
 | `exp-*-exp2_class_a.txt` | mechanism 1 — the go/no-go. dilated-8 + residue-perm-8, predicted 7.79× fewer elements. Permutation cost reported separately. (§4) |
 | `exp-*-exp3_selection.txt` | **the top-ranked contribution.** Does the wall-clock argmin match the element-count argmin? Any disagreement kills novelty item 1 in its current form. (§5b, §5e) |
 | `exp-*-exp4_flex_baseline.txt` | FlexAttention at BLOCK_SIZE 128/64/32 — the incumbent at a tile size it can actually use. (§3a-bis) |
+
+## If the job goes to H or E instead of running
+
+**Get the actual reason first** — everything below is a guess until you do:
+
+```bash
+qstat -sf <jobid> | grep -i comment      # PBS states the hold reason verbatim
+```
+
+Three causes were found in these scripts and fixed; if you hit a fourth, that
+command will name it.
+
+| state | cause | status |
+|---|---|---|
+| **H** (held) | invalid or missing `-A` account. PBS accepts it at submit, then holds forever with no log. | fixed — `#PBS -A` removed, pass `-A` on the command line |
+| **E** (exits at once) | `#PBS -o logs/` with no `logs/` directory. PBS resolves the output path *before* the script body runs, so a `mkdir` inside the job is too late. | fixed — `logs/` is in the repo and `setup.sh` creates it |
+| **E** (exits at once) | `set -euo pipefail` + `source .venv-polaris/bin/activate` when the venv does not exist, i.e. `setup.sh` was never run. Instant non-zero exit before anything runs. Separately, `set -u` breaks `conda activate`, whose scripts reference unset variables. | fixed — activation wrapped in `set +u`, explicit FATAL if the venv is missing |
+| **H** | `-l filesystems=home:eagle` when your allocation is on **grand**. Requesting a filesystem you cannot access is itself a hold. | **RESOLVED** — the repo lives under `/lus/eagle/projects/radix-io/...`, so `home:eagle` is correct as written. |
+| **E** on the login node, before any job | `module load conda` fails dependency resolution (`gcc-native/14.2`, `cray-hdf5-parallel/1.14.3.5` reported UNKNOWN), sometimes after Lmod auto-swaps `PrgEnv-nvidia` → `PrgEnv-gnu`. | fixed — `setup.sh` does `module reset`, then `module --ignore_cache load` across a fallback list, and records which name worked |
+
+`polaris/preflight.sh` checks all of these on a login node before you submit.
+
+## The module name is discovered, not assumed
+
+`setup.sh` tries a fallback list and writes the one that worked to
+`polaris/env.generated.sh`. The three job scripts **source that file** rather than
+hard-coding a name, and fail loudly if it is missing.
+
+This matters because the site's `conda` modulefile has been observed failing
+dependency resolution while other names work. Three `.pbs` files each assuming
+`conda` would have failed in the queue exactly the way `setup.sh` failed on the
+login node — with a queue wait in between.
+
+If `setup.sh` cannot load anything, it prints `module avail` and stops. The two
+diagnostics worth running by hand at that point:
+
+```bash
+module use /soft/modulefiles && module avail conda frameworks
+module spider gcc-native            # is the dependency it wants actually installed?
+```
+
+## Known good configuration
+
+Observed from an actual run, so these are facts rather than defaults:
+
+- repo at `/lus/eagle/projects/radix-io/<user>/...` → `-l filesystems=home:eagle`
+  is correct, and eagle is the right place for it (not `/home`)
+- project appears to be `radix-io` — still pass it explicitly as
+  `qsub -A radix-io ...` rather than hard-coding a `#PBS -A` back in
 
 ## If the smoke test fails
 

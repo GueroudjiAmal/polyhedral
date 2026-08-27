@@ -77,14 +77,30 @@ class DocPack(RowSpec):
         return lo, None
 
     def cols(self, q0, q1, step, N):
+        """Union over rows q0, q0+step, ..., < q1.
+
+        Must walk the AP ROWS, not the documents. The first version walked
+        documents from q0 to qmax and emitted an interval for each, which is
+        wrong whenever a document contains NO row of the AP -- i.e. whenever
+        documents are shorter than step. That over-counted by up to 5.33x on
+        8-token documents under residue-perm-32, and every docpack case in my
+        suite (and in d4's) had documents of 128+ against step <= 32, so the
+        regime was unreachable by either test set.
+        """
         out = []
         qmax = q0 + ((q1 - 1 - q0) // step) * step
-        q = q0
+        q, cur_lo, cur_hi = q0, None, None
         while q <= qmax:
-            lo, nxt = self._doc(q)
-            hi = min(qmax, (nxt - 1) if nxt else qmax)
-            out.append(Iv(lo, hi + 1))
-            q = (nxt if nxt else qmax + 1)
+            lo, _ = self._doc(q)
+            if lo == cur_lo:
+                cur_hi = q
+            else:
+                if cur_lo is not None:
+                    out.append(Iv(cur_lo, cur_hi + 1))
+                cur_lo, cur_hi = lo, q
+            q += step
+        if cur_lo is not None:
+            out.append(Iv(cur_lo, cur_hi + 1))
         return out
 
 
@@ -177,3 +193,35 @@ def select(m, N, BQ, A):
         if best is None or key < best[0]:
             best = (key, nm, c)
     return (best[1], best[2]) if best else (None, None)
+
+
+class BiDoc(RowSpec):
+    """Bidirectional packed documents: live iff q and kv share a document.
+    Not causal, not diagonally invariant, M = M^T. Same AP-row walk as DocPack:
+    a document containing no row of the AP must contribute nothing."""
+
+    def __init__(self, bounds, name="bidoc"):
+        self.b = list(bounds)
+        self.name = name
+
+    def _doc(self, q):
+        lo, hi = 0, None
+        for x in self.b:
+            if x <= q:
+                lo = x
+            else:
+                hi = x
+                break
+        return lo, hi
+
+    def cols(self, q0, q1, step, N):
+        out, seen = [], set()
+        qmax = q0 + ((q1 - 1 - q0) // step) * step
+        q = q0
+        while q <= qmax:
+            lo, hi = self._doc(q)
+            if lo not in seen:
+                seen.add(lo)
+                out.append(Iv(lo, hi if hi is not None else N))
+            q += step
+        return out

@@ -1,0 +1,67 @@
+b5 PREDICTIONS -- exact element counts, generated before any GPU run
+
+== exp2 / GO-NO-GO: dilated-8, identity vs residue-perm-8 ==
+      N     tile       identity            rp8   ratio
+   4096  128x128      8,650,752      1,310,720    6.60x
+   4096   128x64      8,650,752      1,310,720    6.60x
+   4096    64x64      8,519,680      1,179,648    7.22x
+   4096    16x16      8,421,376      1,081,344    7.79x
+   8192  128x128     34,078,720      4,718,592    7.22x
+   8192   128x64     34,078,720      4,718,592    7.22x
+   8192    64x64     33,816,576      4,456,448    7.59x
+   8192    16x16     33,619,968      4,259,840    7.89x
+  16384  128x128    135,266,304     17,825,792    7.59x
+  16384   128x64    135,266,304     17,825,792    7.59x
+  16384    64x64    134,742,016     17,301,504    7.79x
+  16384    16x16    134,348,800     16,908,288    7.95x
+
+== exp1 / tile shape: window-128, does wall clock track elements? ==
+      N     tile       elements  vs 128x128
+   4096  128x128      1,032,192       1.00x
+   4096   128x16      1,032,192       1.00x
+   4096   16x128      1,032,192       1.00x
+   4096    16x16        580,608       1.78x
+  16384  128x128      4,177,920       1.00x
+  16384   128x16      4,177,920       1.00x
+  16384   16x128      4,177,920       1.00x
+  16384    16x16      2,350,080       1.78x
+
+== exp3 / selection: local256+str8 argmin per tile shape, N=4096 ==
+ BQ\\A                   128                    64                    32                    16
+   128residue-perm-4 5,308,416residue-perm-4 4,620,288residue-perm-4 4,620,288residue-perm-4 4,620,288
+    64residue-perm-4 4,620,288residue-perm-4 3,751,936residue-perm-4 3,751,936residue-perm-4 3,751,936
+    32residue-perm-4 4,620,288residue-perm-4 3,751,936residue-perm-8 2,891,776residue-perm-8 2,891,776
+    16residue-perm-4 4,620,288residue-perm-4 3,751,936residue-perm-8 2,891,776residue-perm-8 2,414,592
+
+== PRE-REGISTERED EXPECTATIONS -- what I expect to be WRONG, and why ==
+
+1. exp2 dilated-8 + residue-perm-8 is the one I expect to HOLD in wall clock,
+   within say 25% of the element ratio. Class A keeps every tile contiguous and
+   the permutation is applied once per layer, so there is no omitted traffic
+   term. If this MISSES badly, the class A / class B distinction that the whole
+   taxonomy rests on is wrong, and that outranks every other result.
+
+2. exp1 window-128 at 16x16 will UNDERPERFORM its predicted ratio, probably by a
+   lot. My cost function prices occupancy, MMA efficiency and per-tile softmax
+   statistics at exactly zero, and all three get worse as BQ falls. I expect the
+   measured gain to be well under the element-count gain, and I would not be
+   surprised by a wall-clock LOSS at BQ=16. NOTES 3a already says this bet has
+   bad odds; I am recording that I agree before seeing the number.
+
+3. exp3 selection: my argmin will disagree with the wall-clock argmin on masks
+   where the tie is close, and I expect my model to lose wherever the winner is
+   class B, for the same missing-traffic reason. Where the winner is class A I
+   expect agreement.
+
+4. SPECIFIC FALSIFIER I would accept as killing my engine: any configuration
+   where the measured element count executed by the kernel differs from my
+   predicted element count. That is a claim about counting, not about time, and
+   it has no excuse available. Timing disagreements indict the cost MODEL;
+   count disagreements indict the ENGINE.
+
+5. TIE HAZARD, measured: 41.1% of my costed instances have a class-A/class-B
+   tie on elements. My selector breaks toward class A by construction. Under the
+   shared oracle's candidate-order tie-break my agreement reads 73.2% instead of
+   100%, and the element cost is IDENTICAL in all 90 disagreements. So a low
+   agreement score for me on the shared metric is expected and is not an error.
+

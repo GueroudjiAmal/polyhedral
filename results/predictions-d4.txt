@@ -1,0 +1,249 @@
+==============================================================================
+PREDICTIONS -- session d4 -- written BEFORE any GPU run
+==============================================================================
+
+### exp0 GO/NO-GO  dilated-8 + residue-perm-8  N=4096
+  identity 128x128 elements     8,650,752
+  identity 16x16   elements     8,421,376   speedup 1.027x
+  residue-perm-8 16x16 elements 1,081,344   speedup 8.000x
+  --> PREDICTED WALL-CLOCK SPEEDUP OF THE TRANSFORM: 7.788x
+      (vs the 16x16 identity kernel, which isolates the transform)
+
+### exp1 tile shape  N=4096   predicted elements / speedup vs 128x128
+  window-128       128x128:1.00x  128x64:1.00x  128x32:1.00x  128x16:1.00x  64x128:1.00x  64x64:1.33x  64x16:1.33x  32x128:1.00x  32x32:1.60x  16x128:1.00x  16x32:1.60x  16x16:1.78x
+  window-512       128x128:1.00x  128x64:1.00x  128x32:1.00x  128x16:1.00x  64x128:1.00x  64x64:1.11x  64x16:1.11x  32x128:1.00x  32x32:1.18x  16x128:1.00x  16x32:1.18x  16x16:1.21x
+  local256+str8    128x128:1.00x  128x64:1.00x  128x32:1.00x  128x16:1.00x  64x128:1.00x  64x64:1.02x  64x16:1.02x  32x128:1.00x  32x32:1.02x  16x128:1.00x  16x32:1.02x  16x16:1.03x
+  causal           128x128:1.00x  128x64:1.00x  128x32:1.00x  128x16:1.00x  64x128:1.00x  64x64:1.02x  64x16:1.02x  32x128:1.00x  32x32:1.02x  16x128:1.00x  16x32:1.02x  16x16:1.03x
+
+### exp2 class A  N=4096   predicted element gain from the permutation
+  dilated-4        rp4  128x128:3.67x  128x32:3.67x  64x64:3.82x  32x32:3.91x  16x16:3.95x
+  dilated-8        rp8  128x128:6.60x  128x32:6.60x  64x64:7.22x  32x32:7.59x  16x16:7.79x
+  local256+str8    rp8  128x128:1.12x  128x32:1.53x  64x64:1.84x  32x32:2.92x  16x16:3.49x
+
+### exp3 selection  N=4096   PREDICTED ARGMIN per tile shape
+  (exp3 measures the wall-clock argmin; a mismatch with this row
+   falsifies the cost model as a selector -- see NOTES sec 5b/5e)
+  local256+str8    128x128:rp4  128x32:rp4  128x16:rp4  64x64:rp4  64x16:rp4  32x32:rp8  16x16:rp8
+  dilated-8        128x128:rp8  128x32:stridefold-8  128x16:stridefold-8  64x64:rp8  64x16:stridefold-8  32x32:rp8  16x16:rp8
+  window-128       128x128:shear  128x32:shear  128x16:shear  64x64:shear  64x16:shear  32x32:shear  16x16:shear
+
+==============================================================================
+PRE-REGISTERED EXPECTATIONS -- what I expect to be WRONG, and why
+==============================================================================
+
+Recorded now so it cannot be explained afterwards.
+
+1. exp3 SHOULD SHOW DISAGREEMENT ON window-128, AND MY MODEL SHOULD LOSE.
+   The argmin above says `shear` at every tile shape. shear is class B: NOTES
+   sec 4 measured it buying 1.12x fewer elements while raising kv rows per tile
+   from 16 to 31, about 1.94x traffic. My cost model counts elements and has NO
+   TRAFFIC TERM, so it cannot see that. If the hardware picks identity over
+   shear, the model is wrong in exactly the way it is already known to be wrong,
+   and the fix is a traffic term rather than a new mechanism.
+   A disagreement here is EXPECTED. A disagreement on dilated-8 + residue-perm-8
+   would not be, and would be the serious result.
+
+2. SAME FOR dilated-8, WHERE THE ARGMIN SAYS stridefold-8.
+   stridefold and residue-perm reach identical element counts (both 8x); ties
+   break by candidate order, which puts stridefold first. They are NOT
+   equivalent: stridefold is class B and needs ~136 kv rows per 16x16 tile
+   against residue-perm's 16. The exp0/exp2 comparison uses residue-perm
+   explicitly rather than the argmin, so the go/no-go is unaffected -- but it
+   means my selector, as scored on elements alone, would ship the wrong one.
+   That is a tie-breaking defect the element-count oracle cannot penalise.
+
+3. exp1 SHOULD SHOW WALL-CLOCK FALLING SHORT OF THE PREDICTED 1.78x ON
+   window-128 AT 16x16. The prediction needs BOTH tile axes at 16, and small
+   query tiles cost occupancy, MMA efficiency and per-tile softmax statistics --
+   none of which the model prices (NOTES sec 3a). If measured tracks predicted
+   here, sec 3a's central caveat was wrong and mechanism 2 is worth revisiting.
+
+4. exp2's dilated-8 PREDICTION OF 7.79x IS THE ONE I EXPECT TO HOLD, because
+   the transform is class A: the permutation is applied to K/V once and every
+   tile stays rectangular and contiguous, so there is no traffic term to omit.
+   If this one misses badly, the class A / class B distinction itself is wrong.
+
+==============================================================================
+JSON follows for machine comparison against the other two sessions.
+==============================================================================
+{
+ "session": "d4",
+ "model": "polyattn.selector (exact closed form)",
+ "note": "diagonally-invariant masks only; non-invariant -> declines",
+ "exp0": {
+  "identity_128": 8650752,
+  "identity_16": 8421376,
+  "permuted_16": 1081344,
+  "transform_speedup": 7.787878787878788
+ },
+ "exp1": {
+  "window-128": {
+   "128x128": 1032192,
+   "128x64": 1032192,
+   "128x32": 1032192,
+   "128x16": 1032192,
+   "64x128": 1032192,
+   "64x64": 774144,
+   "64x16": 774144,
+   "32x128": 1032192,
+   "32x32": 645120,
+   "16x128": 1032192,
+   "16x32": 645120,
+   "16x16": 580608
+  },
+  "window-512": {
+   "128x128": 2457600,
+   "128x64": 2457600,
+   "128x32": 2457600,
+   "128x16": 2457600,
+   "64x128": 2457600,
+   "64x64": 2211840,
+   "64x16": 2211840,
+   "32x128": 2457600,
+   "32x32": 2088960,
+   "16x128": 2457600,
+   "16x32": 2088960,
+   "16x16": 2027520
+  },
+  "local256+str8": {
+   "128x128": 8650752,
+   "128x64": 8650752,
+   "128x32": 8650752,
+   "128x16": 8650752,
+   "64x128": 8650752,
+   "64x64": 8519680,
+   "64x16": 8519680,
+   "32x128": 8650752,
+   "32x32": 8454144,
+   "16x128": 8650752,
+   "16x32": 8454144,
+   "16x16": 8421376
+  },
+  "causal": {
+   "128x128": 8650752,
+   "128x64": 8650752,
+   "128x32": 8650752,
+   "128x16": 8650752,
+   "64x128": 8650752,
+   "64x64": 8519680,
+   "64x16": 8519680,
+   "32x128": 8650752,
+   "32x32": 8454144,
+   "16x128": 8650752,
+   "16x32": 8454144,
+   "16x16": 8421376
+  }
+ },
+ "exp2": {
+  "dilated-4": {
+   "128x128": {
+    "identity": 8650752,
+    "permuted": 2359296,
+    "gain": 3.6666666666666665
+   },
+   "128x32": {
+    "identity": 8650752,
+    "permuted": 2359296,
+    "gain": 3.6666666666666665
+   },
+   "64x64": {
+    "identity": 8519680,
+    "permuted": 2228224,
+    "gain": 3.823529411764706
+   },
+   "32x32": {
+    "identity": 8454144,
+    "permuted": 2162688,
+    "gain": 3.909090909090909
+   },
+   "16x16": {
+    "identity": 8421376,
+    "permuted": 2129920,
+    "gain": 3.953846153846154
+   }
+  },
+  "dilated-8": {
+   "128x128": {
+    "identity": 8650752,
+    "permuted": 1310720,
+    "gain": 6.6
+   },
+   "128x32": {
+    "identity": 8650752,
+    "permuted": 1310720,
+    "gain": 6.6
+   },
+   "64x64": {
+    "identity": 8519680,
+    "permuted": 1179648,
+    "gain": 7.222222222222222
+   },
+   "32x32": {
+    "identity": 8454144,
+    "permuted": 1114112,
+    "gain": 7.588235294117647
+   },
+   "16x16": {
+    "identity": 8421376,
+    "permuted": 1081344,
+    "gain": 7.787878787878788
+   }
+  },
+  "local256+str8": {
+   "128x128": {
+    "identity": 8650752,
+    "permuted": 7733248,
+    "gain": 1.11864406779661
+   },
+   "128x32": {
+    "identity": 8650752,
+    "permuted": 5668864,
+    "gain": 1.5260115606936415
+   },
+   "64x64": {
+    "identity": 8519680,
+    "permuted": 4620288,
+    "gain": 1.8439716312056738
+   },
+   "32x32": {
+    "identity": 8454144,
+    "permuted": 2891776,
+    "gain": 2.923512747875354
+   },
+   "16x16": {
+    "identity": 8421376,
+    "permuted": 2414592,
+    "gain": 3.4877014418999153
+   }
+  }
+ },
+ "exp3": {
+  "local256+str8": {
+   "128x128": "residue-perm-4",
+   "128x32": "residue-perm-4",
+   "128x16": "residue-perm-4",
+   "64x64": "residue-perm-4",
+   "64x16": "residue-perm-4",
+   "32x32": "residue-perm-8",
+   "16x16": "residue-perm-8"
+  },
+  "dilated-8": {
+   "128x128": "residue-perm-8",
+   "128x32": "stridefold-8",
+   "128x16": "stridefold-8",
+   "64x64": "residue-perm-8",
+   "64x16": "stridefold-8",
+   "32x32": "residue-perm-8",
+   "16x16": "residue-perm-8"
+  },
+  "window-128": {
+   "128x128": "shear",
+   "128x32": "shear",
+   "128x16": "shear",
+   "64x64": "shear",
+   "64x16": "shear",
+   "32x32": "shear",
+   "16x16": "shear"
+  }
+ }
+}

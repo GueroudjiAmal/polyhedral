@@ -1,6 +1,9 @@
 #!/bin/bash -l
 #PBS -N polyattn-smoke
-#PBS -A CHANGE_ME_PROJECT
+# NOTE: no #PBS -A here on purpose. Pass it at submit time:
+#         qsub -A <your_project> polaris/<script>.pbs
+#       A placeholder or invalid project is accepted by qsub and the
+#       job then sits in H (held) forever with no log written.
 #PBS -q debug
 #PBS -l select=1:system=polaris
 #PBS -l place=scatter
@@ -17,10 +20,34 @@ set -euo pipefail
 cd "${PBS_O_WORKDIR:-$PWD}"
 mkdir -p logs results
 
+# The module name is DISCOVERED by setup.sh, not assumed here -- the site's
+# `conda` modulefile has been seen to fail dependency resolution while
+# `frameworks` works. env.generated.sh records whichever one actually loaded.
+if [ -f polaris/env.generated.sh ]; then
+  . polaris/env.generated.sh
+else
+  echo "FATAL: polaris/env.generated.sh missing -- run polaris/setup.sh on a LOGIN node first." >&2
+  exit 1
+fi
+
 module use /soft/modulefiles
-module load conda
+module --ignore_cache load "${POLYATTN_MODULE:-conda}" || {
+  echo "FATAL: module load ${POLYATTN_MODULE:-conda} failed on the compute node" >&2
+  echo "       (it worked on the login node -- module stacks can differ)" >&2
+  exit 1
+}
+
+# conda's activate scripts reference unset variables; `set -u` turns that into
+# an immediate non-zero exit, which PBS reports only as a job that went straight
+# to E with an empty log. Disable -u across activation, restore after.
+set +u
 conda activate base
+if [ ! -f .venv-polaris/bin/activate ]; then
+  echo "FATAL: .venv-polaris missing -- run polaris/setup.sh on a LOGIN node first." >&2
+  exit 2
+fi
 source .venv-polaris/bin/activate
+set -u
 
 export CUDA_VISIBLE_DEVICES=0          # 1 of the node's 4 A100s; nothing here scales out
 export TRITON_CACHE_DIR="$PWD/.triton-cache-$PBS_JOBID"

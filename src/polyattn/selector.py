@@ -206,6 +206,11 @@ def costs(mask, N, BQ, A, runs=None):
     return out
 
 
+def _is_class_b(name):
+    """Class B = q-dependent (shear, stridefold): per-tile gather, un-amortisable."""
+    return name == "shear" or name.startswith("stridefold-")
+
+
 def select(mask, N, BQ, A):
     """The selector. Returns a candidate name.
 
@@ -218,4 +223,15 @@ def select(mask, N, BQ, A):
     c = costs(mask, N, BQ, A)
     if not c:
         return "identity"
-    return min(c, key=lambda k: (c[k], CANDIDATES.index(k)))
+    # TIE-BREAK IN FAVOUR OF CLASS A. stridefold-s and residue-perm-s reach
+    # IDENTICAL element counts on a lattice mask -- exactly tied, not close --
+    # but stridefold is class B and needs ~136 kv rows per 16x16 tile against
+    # residue-perm's 16 (NOTES sec 4). Element count cannot see that, so on a tie
+    # the cost function is indifferent between a free transform and a
+    # traffic-heavy one. 20.5% of costed instances have such a tie.
+    #
+    # This is encoding a mechanism established independently in sec 4, not tuning
+    # against the shared test set. It also LOWERS the agreement score, because
+    # the oracle breaks ties by candidate order and will often name the class B
+    # option -- see NOTES sec 5h. The better answer scores worse.
+    return min(c, key=lambda k: (c[k], _is_class_b(k), CANDIDATES.index(k)))

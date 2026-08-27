@@ -913,7 +913,7 @@ unbounded `D`, random 120-offset sets, stride 3).
 | | value |
 |---|---|
 | **agreement** | **97.9%** (699/714) |
-| **regret** | mean **1.0005**, max **1.0562** |
+| **regret** | mean **1.0005**, max **1.0562** — *but see §5g; this is a long-document number* |
 | worst case | docpack-512, N=2048, 128×32: picked identity, best shear |
 | selector runtime | 8.6 ms/instance average |
 
@@ -978,16 +978,55 @@ model for translation-invariant sparse attention** — causal, windowed, dilated
 strided — excluding document packing (FlashMask's headline workload) and
 attention sinks (StreamingLLM).
 
-**CONTESTED — do not write this narrowing into a claim yet.** A third session
-reports removing the restriction entirely with a union-of-arithmetic-progressions
-primitive that covers sinks and docpack, independently checked by the reviewing
-session at 540/540 on sinks. This session has not verified either the primitive
-or that figure. If it holds, the convergence on the lattice/band family was an
-artefact of two formulations rather than a property of the problem — which would
-make the *scope* blind spot a false alarm and leave only the alignment one
-genuinely refuted. **Verify before narrowing anything.** Recorded here because
-two sessions were each about to write a restriction into the claim on the
-strength of their own formulation's limits.
+**RESOLVED — do not write that narrowing. It was a false alarm.** A third session
+removed the restriction with a union-of-arithmetic-progressions primitive that
+needs neither diagonal invariance nor causality: it needs only that the mask can
+state, in closed form, the union of live kv columns over an *arithmetic
+progression of query rows*. Document boundaries are parameters known at launch,
+so packing qualifies.
+
+**Verified in this session against this session's own oracle** — a different
+implementation from theirs, so a shared bug cannot pass both — after first
+checking that the two definitions of each mask agree elementwise:
+
+| | cells | result |
+|---|---|---|
+| `sinks{4,8,16}+win{256,128,8,4,2}`, N ∈ {1024, 2048}, all 16 tile shapes | 1344 | **all exact** |
+| `docpack-{128,512,2048}`, N ∈ {1024, 2048} | 672 | **all exact** |
+
+The sinks set deliberately includes four cases with **window narrower than the
+fold depth** (`w < s`) — the regime that session's own suite could not reach,
+which they disclosed and asked to be probed. Those are now in the shared test set
+(`selector_oracle.test_masks`) so no implementation can be blind to them again.
+
+### The real boundary
+
+Not translation invariance. **Statically known, structured masks** — which
+coincides with the line §1 already drew for the whole project:
+
+- **Data-dependent masks are out, and this is hard rather than unimplemented.**
+  Learned or top-k selection, KV eviction, score-derived permutations: no closed
+  form exists to hand the primitive. This is exactly the inspector/executor
+  boundary from §1. Packing is fine because the boundaries are launch parameters;
+  learned selection is not.
+- **Many runs per row degrades the guarantee, not the exactness.** Cost is
+  O(runs per row-block); a pseudorandom mask has O(N) runs per row, so it decays
+  to O(N²) and brute force wins. "Sub-quadratic" is a claim about *structured*
+  predicates, not all predicates.
+- **Predicates with no closed-form AP-union** — e.g. `(q·kv) mod p < t` — are in
+  scope in principle and unimplemented in fact.
+- Candidate-set and `N % s == 0` limits are implementation, not spec.
+
+### The near-miss is the instructive half
+
+Two independent implementations converged on a restriction that would have
+excluded FlashMask's headline workload and StreamingLLM from the central claim,
+and both of us read that convergence as evidence about the *problem*. It was
+evidence about two formulations that had both inherited the zoo's framing. **What
+caught it was a third test set containing masks neither implementation could
+represent** — not the independence protocol, which had no way to see it. Three
+independent implementations can agree for the same wrong reason; only an input
+none of them chose can show it.
 
 ### A prediction on the record, falsified
 
@@ -1020,6 +1059,77 @@ form the "symbolic beats numerical" claim has taken.
 small — 68 ms at N=16384 is numpy overhead in offset extraction, not the cost
 model — which is irrelevant for a compile-time decision and would matter if this
 ever ran per batch.
+
+---
+
+## §5g — Correction: the reported max regret was itself a regime artefact
+
+§5f reported max regret **1.0562**, worst case docpack. Every `docpack` instance
+in the test set had documents far longer than any candidate fold depth. Probed
+outside that regime, at N=1024:
+
+| mask | tile | my pick | oracle best | regret |
+|---|---|---|---|---|
+| docpack, docs of ~4 | 128×32 | identity | shear | **7.24** |
+| docpack, docs of ~8 | 128×32 | identity | shear | **6.91** |
+| bidoc, docs of ~8 | 128×32 | identity | shear | 4.09 |
+| docpack, mixed 2/895 | 128×32 | identity | shear | 1.03 |
+
+**Max regret is 7.24, not 1.06.** With short documents the mask is close to a
+narrow band, `shear` straightens it, and identity is a poor answer rather than a
+near-optimal one. The declining-is-cheap story in §5f holds only where documents
+are long, which was every case measured.
+
+Found because another session, having hit the analogous hole in their own engine
+(documents shorter than the fold depth), told me to check whether my *fallback*
+was still correct there rather than only cheap. It was not.
+
+This is the **fifth instance in one day** of the same failure, and the second
+committed by this session — this time in a headline number, reported with a
+confident maximum, on a test set whose docpack cases all shared a property nobody
+had written down.
+
+The eight regime probes are now in the shared set with `PROBES` naming what each
+one violates, and `uncovered_regimes()` lists what is still not probed. A test set
+that is merely long reads as comprehensive; that is how both holes survived.
+
+---
+
+## §5h — A defect the element-count metric cannot penalise
+
+Emitting pre-run predictions for the GPU experiments (`gpu/predict.py`, a
+suggestion from the third session: write all three cost models' predictions down
+*before* the timing, so one wall-clock number tests three models rather than
+one) surfaced a defect in this session's selector that 714 scored instances had
+not.
+
+`stridefold-s` and `residue-perm-s` reach **identical** element counts on a
+lattice mask — exactly tied, not close. At N=4096, dilated-8, 16×16, both cost
+1,081,344. They are not interchangeable:
+
+| candidate | elements | class | kv rows per 16×16 tile |
+|---|---|---|---|
+| residue-perm-8 | 1,081,344 | **A** (free) | **16** |
+| stridefold-8 | 1,081,344 | B (per-tile gather) | **136** |
+
+Ties broke by candidate order, which put `stridefold` first. **20.5% of costed
+instances contain a class-A/class-B tie, and the selector was shipping the
+traffic-heavy option in 18 of them.**
+
+Fixed: ties now break toward class A. This encodes a mechanism established
+independently in §4, not a fit to the test set.
+
+**The interesting part is that the fix makes the score worse.** The oracle also
+breaks ties by candidate order and will often name the class B option, so
+choosing the better transform *reduces* measured agreement. An
+element-count-only metric is indifferent between a free transform and one that
+needs 8× the memory traffic, and will actively penalise preferring the free one.
+
+That is a property of the evaluation all three sessions agreed on, not of any one
+selector — and it went unnoticed through 714 instances, three independent
+implementations and a shared oracle. It is also a preview of what the GPU is for:
+the tie is invisible to every model any of us built, and trivially visible to
+hardware.
 
 ---
 
@@ -1253,9 +1363,19 @@ unbounded ones); a reviewing session verified a cost engine on *non-negative*
 displacement sets and called it exact by construction (180/828 cells wrong on
 signed ones); a third hit the same shape on a stride/width relation.
 
-**The operative check is mechanical and can be run in advance:** *ask what regime
-every one of your test inputs shares, and pick an input outside it.* That is the
-one version of this rule that works before the fact rather than in hindsight.
+**The operative check is mechanical and can be run in advance:** *enumerate what
+your inputs hold constant, and vary each one.* Not "test more", not "get
+independent implementations" — both were tried today and neither caught these.
+Three of one session's four bugs were found by this move and none by additional
+testing; it also caught the two that no test set any of the three sessions wrote
+could have seen, because all three of us think of documents as long and of
+windows as wide.
+
+**It outranks the independence protocol**, on two instances from today: three
+independent implementations can converge on the same wrong restriction (§5f), and
+no independently-written test set catches a regime all three authors share an
+assumption about. Independence diversifies implementations; it does not
+diversify priors.
 
 Errors were roughly evenly split between sessions, and every one had the same
 shape: **a condition claimed from whatever masks happened to be in the zoo.** The

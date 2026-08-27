@@ -192,23 +192,40 @@ class DocPacked(Mask):
     family = "doc-packed"
     data_dependent = True
 
-    def __init__(self, mean_len, seed=0):
+    def __init__(self, mean_len, seed=0, min_len=16, bounds=None):
+        """`min_len` floors the sampled document length; `bounds` overrides
+        sampling entirely with explicit start offsets.
+
+        Both exist so the zoo can hold documents SHORTER than the largest fold
+        depth. Every docpack case in this project used documents far longer than
+        any residue-perm stride, which hid a real bug in another session's
+        engine -- see NOTES sec 7b."""
         self.mean_len, self.seed = mean_len, seed
-        self.name = f"docpack-{mean_len}"
+        self.min_len, self.bounds = min_len, bounds
+        self.name = (f"docpack-b{'-'.join(map(str, bounds))}" if bounds
+                     else f"docpack-{mean_len}" + (f"m{min_len}" if min_len != 16 else ""))
         self._cache = {}
 
     def _bounds(self, N):
         """starts[i] for each position i, and the list of (start, end) docs."""
         if N in self._cache:
             return self._cache[N]
+        if self.bounds is not None:
+            edges = [b for b in self.bounds if b < N] + [N]
+            docs = [(edges[i], edges[i + 1]) for i in range(len(edges) - 1)]
+            starts = np.zeros(N, dtype=np.int64)
+            for s_, e_ in docs:
+                starts[s_:e_] = s_
+            self._cache[N] = (starts, docs)
+            return self._cache[N]
         rng = np.random.default_rng(self.seed)
         lens = []
         tot = 0
-        # lognormal doc lengths with the requested mean, floored at 16 tokens
+        # lognormal doc lengths with the requested mean, floored at min_len
         sigma = 0.6
         mu = np.log(self.mean_len) - sigma ** 2 / 2
         while tot < N:
-            L = int(max(16, round(rng.lognormal(mu, sigma))))
+            L = int(max(self.min_len, round(rng.lognormal(mu, sigma))))
             lens.append(min(L, N - tot))
             tot += lens[-1]
         edges = np.concatenate([[0], np.cumsum(lens)])

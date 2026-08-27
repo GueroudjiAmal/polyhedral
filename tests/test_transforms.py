@@ -65,3 +65,16 @@ def test_pure_lattice_selection_is_grain_independent():
     _, argmin = gd.sweep(masks.Dilated(8), N=1024)
     assert len({v for v in argmin.values()}) == 1
     assert argmin[(16, 16)] == "residue-perm-8"
+
+
+def test_selector_breaks_ties_toward_the_free_transform():
+    """docs/NOTES.md §5h. stridefold-s and residue-perm-s reach IDENTICAL element
+    counts on a lattice mask, but stridefold is class B (~136 kv rows per 16x16
+    tile vs 16). The cost function cannot see the difference; the tie-break must.
+    """
+    from polyattn import selector
+    for s in (2, 4, 8):
+        m = masks.Dilated(s)
+        c = selector.costs(m, 2048, 16, 16)
+        assert c[f"stridefold-{s}"] == c[f"residue-perm-{s}"], "must be an exact tie"
+        assert selector.select(m, 2048, 16, 16) == f"residue-perm-{s}"

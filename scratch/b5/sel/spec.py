@@ -134,13 +134,36 @@ class DiagSpec:
         return BQ * A * tot
 
     def live(self, N):
+        """Number of live (q,kv) pairs. Sums N-d over the UNION of offsets.
+
+        The first version summed each piece independently, which double-counts
+        wherever pieces overlap -- e.g. local256+str8, whose band [0,256) and
+        stride-8 lattice share the offsets 0,8,...,248. That inflated `live` by
+        8.9% and hence deflated every waste RATIO by 0.919. Costs were never
+        affected (they are validated against the oracle); only this denominator.
+        """
+        ivs = []
+        for p in self.pieces:
+            q = p.clip(N)
+            if isinstance(q, Iv) and not q.empty():
+                ivs.append((q.lo, q.hi))
+        ivs.sort()
+        merged = []
+        for a, b in ivs:
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
         tot = 0
+        for a, b in merged:
+            for d in range(a, b):
+                tot += N - d
         for p in self.pieces:
             q = p.clip(N)
             if isinstance(q, Iv):
-                for d in range(q.lo, q.hi):
+                continue
+            for m in range(q.count):
+                d = q.start + m * q.stride
+                if not any(a <= d < b for a, b in merged):
                     tot += N - d
-            else:
-                for m in range(q.count):
-                    tot += N - (q.start + m * q.stride)
         return tot

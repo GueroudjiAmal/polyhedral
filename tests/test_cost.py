@@ -244,3 +244,64 @@ def test_unweighted_closed_form_fails_for_unbounded_offset_sets():
             assert ratio < 1.05, "bounded D: approximation should be close"
         else:
             assert ratio > 1.9, "unbounded D: approximation should be ~2x off"
+
+
+def test_docpack_supports_documents_shorter_than_the_fold_depth():
+    """docs/NOTES.md §5g. Every docpack case in this project had documents far
+    longer than any candidate stride, which hid a real bug in another session's
+    engine and made this session's reported max regret a long-document number."""
+    import numpy as np
+    N = 1024
+    m = masks.DocPacked(8, min_len=2)
+    _, docs = m._bounds(N)
+    lens = [e - s for s, e in docs]
+    assert min(lens) < 8, "the probe must actually contain short documents"
+    M = np.stack([m.row_cols(q, N) for q in range(N)])
+    assert m.live_count(N) == int(M.sum())          # closed form still exact
+
+    explicit = masks.DocPacked(0, bounds=[0, 3, 5, 900])
+    _, d2 = explicit._bounds(N)
+    assert [e - s for s, e in d2] == [3, 2, 895, 124]
+
+
+def test_selector_fallback_is_poor_on_short_documents():
+    """§5g, pinned so the corrected number cannot silently regress to the old
+    optimistic one: identity is NOT near-optimal when documents are short."""
+    from polyattn import selector, selector_oracle as so
+    m = masks.DocPacked(4, min_len=2)
+    best, costs = so.oracle(m, 1024, 128, 32)
+    pick = selector.select(m, 1024, 128, 32)
+    assert pick == "identity"                        # the stated fallback
+    assert costs[pick] / costs[best] > 3.0, "regret here is ~7x, not ~1.06"
+
+
+def test_symmetry_extends_to_non_square_domains():
+    """docs/NOTES.md §5e/§7d. A reviewing session flagged that the symmetry proof
+    assumes a square domain -- the point reflection (q,kv) -> (Nq-1-q, Nkv-1-kv)
+    carries d to (Nq-Nkv)-d, not -d, so the involution no longer closes.
+
+    It closes anyway, and the reason is that comparing w(BQ,A) with w(A,BQ) on a
+    rectangular domain requires BOTH tile sizes to divide BOTH dimensions -- so
+    they divide the difference, and the shift (Nkv-Nq) is necessarily a multiple
+    of the tile. The hypothesis that saves it is divisibility, which the cost
+    model already asserts. Squareness was never the load-bearing assumption.
+    """
+    import numpy as np
+    from polyattn import transforms
+    dims = (128, 64, 32, 16)
+    preds = [lambda q, kv: kv <= q,
+             lambda q, kv: (kv <= q) & (q - kv < 128),
+             lambda q, kv: (kv <= q) & ((q - kv) % 8 == 0)]
+    for Nq, Nkv in ((1024, 2048), (2048, 1024), (1024, 1536)):
+        q = np.arange(Nq)[:, None]
+        kv = np.arange(Nkv)[None, :]
+        for pred in preds:
+            M = pred(q, kv)
+            live = int(M.sum())
+            for a in dims:
+                for b in dims:
+                    if a == b or any(n % t for n in (Nq, Nkv) for t in (a, b)):
+                        continue
+                    w1 = transforms.tile_stats(M, a, b)[1] / live
+                    w2 = transforms.tile_stats(M, b, a)[1] / live
+                    assert abs(w1 - w2) < 1e-12, f"{Nq}x{Nkv} {a}/{b}"

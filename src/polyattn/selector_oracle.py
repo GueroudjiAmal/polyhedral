@@ -87,6 +87,16 @@ def test_masks(seed=20260826):
         for off in (300, 500, 1000):
             out.append(masks.TwoBand(w, off))
 
+    # Regime probes. Each exists to VIOLATE a property that every other mask in
+    # the set happens to satisfy -- see PROBES below for which. Do not add a mask
+    # here without naming the property it breaks, or the set grows long without
+    # growing in coverage, which is exactly how the two holes below survived.
+    out += [masks.SinksWindow(4, 8), masks.SinksWindow(4, 4),
+            masks.SinksWindow(16, 4), masks.SinksWindow(8, 2),
+            masks.DocPacked(8, min_len=2), masks.DocPacked(4, min_len=2),
+            masks.DocPacked(0, bounds=[0, 3, 5, 900]),
+            masks.BidirectionalDocPacked(8)]
+
     # random diagonally-invariant offset sets
     rng = np.random.default_rng(seed)
     for i, k in enumerate((50, 200, 600)):
@@ -94,6 +104,53 @@ def test_masks(seed=20260826):
         out.append(_custom(lambda q, kv, D=D: (kv <= q) & np.isin(q - kv, D),
                            f"randD-{k}"))
     return out
+
+
+#: What each probe mask exists to violate. Every other mask in the set satisfies
+#: the property; the probe does not. Both holes recorded here were real bugs in
+#: real implementations, found only after someone enumerated what their inputs
+#: held constant -- so the annotation is load-bearing, not documentation.
+PROBES = {
+    "sinks4+win8":   "window NARROWER than the fold depth (w < s)",
+    "sinks4+win4":   "w < s, extreme",
+    "sinks16+win4":  "w < s with g > w",
+    "sinks8+win2":   "w < s, minimal window",
+    "docpack-8m2":   "documents SHORTER than the fold depth",
+    "docpack-4m2":   "documents shorter than the fold depth, extreme",
+    "docpack-b0-3-5-900": "mixed 2-token and 895-token documents",
+    "bidoc-8":       "short documents, bidirectional (symmetric, non-invariant)",
+    "twoband-128+1000": "diagonal run offset NOT a multiple of the coarsest tile",
+    "randD-600":     "unstructured offset set, many runs per row",
+    "c2-splitter":   "argmin splits within a max(BQ,A) class",
+}
+
+
+def uncovered_regimes():
+    """Regimes known to exist and NOT probed by this set. Keep it honest.
+
+    Ordered by how likely each is to change a claim rather than add a caveat.
+    Add to this list when you decide NOT to probe something -- a long test set
+    reads as comprehensive, and only an explicit record of what is missing stops
+    that illusion returning at a larger mask count.
+    """
+    return [
+        # 1. Could change a claim, not merely caveat it.
+        "DECODE: N_q = 1, or N_q smaller than one query tile. The cost model "
+        "asserts BQ | N_q, which fails outright. This is the dominant serving "
+        "cost and no experiment here has touched it. NOTE: general non-square "
+        "N_q != N_kv is now COVERED -- see tests/test_cost.py, symmetry holds "
+        "whenever both tile sizes divide both dimensions.",
+        "backward pass -- different access pattern, no selector has been asked",
+        "multiple transforms composed; the candidate set is single transforms "
+        "and the composition search of NOTES sec 5 is a separate mechanism",
+        # 2. Caveats.
+        "data-dependent masks (learned / top-k selection, KV eviction) -- a hard "
+        "boundary, not an implementation gap; see NOTES sec 5f",
+        "predicates with no closed-form AP-union, e.g. (q*kv) mod p < t",
+        "fold depth exceeding the sequence (s > N), and N below one tile",
+        "tile shapes that are not powers of two",
+        "head- or batch-varying masks",
+    ]
 
 
 def instances(ns=GRID_NS, tiles=GRID_TILES, seed=20260826):
