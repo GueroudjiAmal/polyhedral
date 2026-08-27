@@ -89,6 +89,18 @@ PYGATE
 # The documented fix, verbatim from the known-issues page.
 export TMPDIR=/tmp
 
+# HOST COMPILER FOR INDUCTOR. When `module load` fails, PrgEnv-nvidia's compilers
+# stay on PATH and inductor builds its cuda_utils helper with `nvc`, which
+# rejects the GCC flag -Wno-psabi and takes down EVERY compile -- including
+# configurations that work fine when the module load succeeds. Pin gcc so the
+# result does not depend on whether a modulefile resolved.
+if command -v gcc >/dev/null; then
+  export CC="$(command -v gcc)" CXX="$(command -v g++)"
+  echo "host compiler for inductor: $CC"
+else
+  echo "WARN: no gcc on PATH; inductor may fall back to nvc and fail on -Wno-psabi" >&2
+fi
+
 export CUDA_VISIBLE_DEVICES=0
 export TRITON_CACHE_DIR="$PWD/.triton-cache-$PBS_JOBID"
 export TORCHINDUCTOR_CACHE_DIR="$PWD/.inductor-cache-$PBS_JOBID"

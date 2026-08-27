@@ -73,7 +73,30 @@ def main():
     except Exception as e:
         print(f"flex_attention unavailable: {e}")
         return 1
-    print(f"torch {torch.__version__}   N={N} B={B} H={H} D={D}\n")
+    import os, shutil, subprocess
+    cc = os.environ.get("CC") or shutil.which("cc") or "?"
+    print(f"torch {torch.__version__}   N={N} B={B} H={H} D={D}")
+    print(f"host compiler inductor will use: CC={cc}")
+    # Prove FAILURE A is gone before reporting on anything else. A run where the
+    # host compiler rejects -Wno-psabi fails EVERY configuration identically and
+    # says nothing about FlexAttention -- which is exactly what the first
+    # diagnostic run did.
+    try:
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "t.c")
+            open(src, "w").write("int f(void){return 0;}\n")
+            subprocess.run([cc, src, "-O3", "-shared", "-fPIC", "-Wno-psabi",
+                            "-o", os.path.join(d, "t.so")],
+                           check=True, capture_output=True)
+        print("  -Wno-psabi accepted -- FAILURE A (nvc host compiler) is not in play\n")
+    except Exception as e:
+        print(f"  -Wno-psabi REJECTED by {cc}: every compile below will fail for")
+        print("  that reason and NOTHING here will be about FlexAttention.")
+        print("  Set CC=gcc CXX=g++ and rerun. Aborting rather than producing")
+        print(f"  a table of identical irrelevant errors.  ({type(e).__name__})")
+        return 2
+
     print("""NOTE: a SINGLE torch.compile'd callable is reused across calls in
 exp0/exp4, and kernel_options may be baked in at first compile -- so passing
 different kernel_options per call can be silently ignored. That is the leading
