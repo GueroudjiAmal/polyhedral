@@ -1,0 +1,42 @@
+#!/bin/bash -l
+#PBS -N polyattn-gonogo
+#PBS -A CHANGE_ME_PROJECT
+#PBS -q debug
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=00:30:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+#PBS -o logs/
+
+# SMOKE TEST + THE ONE MEASUREMENT THAT DECIDES THE PROJECT.
+# Submit this before job_experiments.pbs. If exp0 says the 7.79x predicted
+# element reduction does not become a wall-clock win, the broad sweep is not
+# worth queueing.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+mkdir -p logs results
+
+module use /soft/modulefiles
+module load conda
+conda activate base
+source .venv-polaris/bin/activate
+
+export CUDA_VISIBLE_DEVICES=0
+export TRITON_CACHE_DIR="$PWD/.triton-cache-$PBS_JOBID"
+export TORCHINDUCTOR_CACHE_DIR="$PWD/.inductor-cache-$PBS_JOBID"
+
+STAMP="$(date +%Y%m%d-%H%M%S)-${PBS_JOBID%%.*}"
+OUT="results/gonogo-$STAMP.txt"
+{
+  echo "host $(hostname)   $(date -Is)"
+  nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv || true
+  echo; echo "############ env ############"
+  python gpu/env_check.py
+  echo; echo "############ correctness ####"
+  python gpu/test_correctness.py
+  echo; echo "############ GO/NO-GO #######"
+  python gpu/exp0_gonogo.py
+} 2>&1 | tee "$OUT"
+echo "wrote $OUT"

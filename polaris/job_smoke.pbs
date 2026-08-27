@@ -1,0 +1,38 @@
+#!/bin/bash -l
+#PBS -N polyattn-smoke
+#PBS -A CHANGE_ME_PROJECT
+#PBS -q debug
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=00:20:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+#PBS -o logs/
+
+# GATE JOB. Run this first and read every line of the output.
+# Nothing downstream means anything if the kernel is wrong, and the kernel has
+# never been executed anywhere -- it was written on a laptop with no GPU.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+mkdir -p logs results
+
+module use /soft/modulefiles
+module load conda
+conda activate base
+source .venv-polaris/bin/activate
+
+export CUDA_VISIBLE_DEVICES=0          # 1 of the node's 4 A100s; nothing here scales out
+export TRITON_CACHE_DIR="$PWD/.triton-cache-$PBS_JOBID"
+
+STAMP="$(date +%Y%m%d-%H%M%S)-${PBS_JOBID%%.*}"
+OUT="results/smoke-$STAMP.txt"
+{
+  echo "host $(hostname)   job ${PBS_JOBID:-none}   $(date -Is)"
+  nvidia-smi || true
+  echo; echo "############ env_check ############"
+  python gpu/env_check.py
+  echo; echo "############ correctness ##########"
+  python gpu/test_correctness.py
+} 2>&1 | tee "$OUT"
+echo "wrote $OUT"

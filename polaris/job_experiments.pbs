@@ -1,0 +1,44 @@
+#!/bin/bash -l
+#PBS -N polyattn-exp
+#PBS -A CHANGE_ME_PROJECT
+#PBS -q preemptable
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+#PBS -o logs/
+
+# THE FOUR EXPERIMENTS. Only run this after job_smoke.pbs comes back clean.
+# Queue note: 'preemptable' usually starts sooner and can be killed; every
+# experiment writes its own file, so a preemption costs you the tail, not the run.
+# Use -q prod for a guaranteed slot.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+mkdir -p logs results
+
+module use /soft/modulefiles
+module load conda
+conda activate base
+source .venv-polaris/bin/activate
+
+export CUDA_VISIBLE_DEVICES=0
+export TRITON_CACHE_DIR="$PWD/.triton-cache-$PBS_JOBID"
+export TORCHINDUCTOR_CACHE_DIR="$PWD/.inductor-cache-$PBS_JOBID"
+
+STAMP="$(date +%Y%m%d-%H%M%S)-${PBS_JOBID%%.*}"
+echo "host $(hostname)  $(date -Is)" | tee "results/exp-$STAMP.meta"
+nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv \
+  | tee -a "results/exp-$STAMP.meta"
+
+# Re-gate cheaply: a preempted requeue could land on a different node type.
+python gpu/env_check.py > "results/exp-$STAMP-env.txt" 2>&1
+
+for e in exp1_tile_shape exp2_class_a exp3_selection exp4_flex_baseline; do
+  echo "===== $e ====="
+  # keep going if one experiment fails; the others are independent
+  python "gpu/$e.py" 2>&1 | tee "results/exp-$STAMP-$e.txt" || \
+    echo "  $e FAILED -- see results/exp-$STAMP-$e.txt"
+done
+echo "all outputs under results/, stamp $STAMP"

@@ -1,0 +1,89 @@
+"""EXPERIMENT 3 -- the top-ranked contribution. docs/NOTES.md sec 5b/5e.
+
+CLAIM UNDER TEST: transform selection is a function of (predicate, BQ, A), and a
+cost model can pick the winner. Analytically the argmin for local256+str8 moves
+identity -> rp2 -> rp4 -> rp8 across tile shapes, and sec 5e showed it even splits
+WITHIN a max(BQ,A) class.
+
+This asks the only question that matters for the compiler framing:
+DOES THE WALL-CLOCK ARGMIN MATCH THE ELEMENT-COUNT ARGMIN?
+
+  * agrees everywhere -> the cost model is a valid selector; the contribution
+    stands and the compiler has something to optimise against.
+  * disagrees -> the cost model selects the wrong transform on real hardware,
+    and item 1 of the novelty ranking is dead in its current form. That would be
+    the single most important negative result the project could produce, so it
+    is worth more care than anything else here.
+
+Reports both argmins per tile shape and flags every disagreement.
+"""
+import sys
+
+import numpy as np
+import torch
+
+sys.path.insert(0, __file__.rsplit("/", 1)[0])
+import blockindex, bench, masks_gpu, permute               # noqa: E402
+from triton_attn import block_sparse_attention             # noqa: E402
+
+N, D, BH = 4096, 64, 8
+NAMES = ["local256+str8", "dilated-8", "window-128"]
+TILES = [(128, 128), (128, 32), (128, 16), (64, 64), (64, 16), (32, 32), (16, 16)]
+PERMS = [None, 2, 4, 8, 16]
+
+
+class _Dense:
+    def __init__(self, M):
+        self.M = M
+    def row_cols(self, q, N):
+        return self.M[q]
+
+
+def main():
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(BH, N, D, device="cuda", dtype=torch.float16) for _ in range(3))
+    disagreements = 0
+    for name in NAMES:
+        m = masks_gpu.numpy_mask(name)
+        kind, p0, p1, p2 = masks_gpu.triton_params(name)
+        M = np.stack([m.row_cols(i, N) for i in range(N)])
+
+        variants = {}
+        for s in PERMS:
+            tag = "identity" if s is None else f"rp{s}"
+            p_np = permute.identity_perm(N) if s is None else permute.residue_perm(N, s)
+            perm = torch.from_numpy(p_np).cuda()
+            variants[tag] = (M[p_np][:, p_np], perm,
+                             tuple(permute.apply_perm(x, perm) for x in (q, k, v)))
+
+        rows = []
+        for BQ, A in TILES:
+            el, ms = {}, {}
+            for tag, (Mv, perm, (qv, kv_, vv)) in variants.items():
+                bi = blockindex.build(_Dense(Mv), N, BQ, A)
+                idx = blockindex.to_cuda(bi)
+                el[tag] = bi.elements
+                ms[tag] = bench.time_ms(lambda: block_sparse_attention(
+                    qv, kv_, vv, *idx, kind, p0, p1, p2, BQ, A,
+                    perm_q=perm.int(), perm_kv=perm.int()), reps=60)[0]
+            a_el = min(el, key=el.get)
+            a_ms = min(ms, key=ms.get)
+            agree = a_el == a_ms
+            disagreements += (not agree)
+            rows.append([f"{BQ}x{A}", a_el, a_ms, "yes" if agree else "NO",
+                         ms[a_ms] / ms[a_el] if not agree else 1.0])
+        bench.report(
+            rows,
+            [("tile", 10), ("argmin elems", 14), ("argmin time", 13),
+             ("agree", 8), ("cost of", 10)],
+            title=f"{name}   N={N} BH={BH}   selector validity",
+            note="'cost of' = how much slower the model's pick is than the true best.\n"
+                 "1.00 means no loss; anything above it is the price of a wrong selection.")
+    print(f"\n{'=' * 60}")
+    print(f"TOTAL DISAGREEMENTS: {disagreements}")
+    print("Zero -> the element-count cost model is a valid transform selector.")
+    print("Nonzero -> it is not, and NOTES novelty item 1 needs restating.")
+
+
+if __name__ == "__main__":
+    main()
